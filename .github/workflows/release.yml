@@ -28,14 +28,17 @@ jobs:
         id: build
         run: |
           version="$(grep "version = " Cargo.toml | head -n 1 | awk -F '"' '{ print $2 }')"
-          [[ $(git tag | grep -c "$version") != 0 ]] && exit 0
+          # [[ $(git tag | grep -c "$version") != 0 ]] && exit 0
           echo "release=$version" >> $GITHUB_OUTPUT
           echo "## building" > $GITHUB_STEP_SUMMARY
           cargo build -r
+          ls target/release
           echo "## releasing" > $GITHUB_STEP_SUMMARY
 
       - uses: Swatinem/rust-cache@v2
         if: steps.build.outputs.release
+        with:
+          shared-key: cache01
 
       - name: release artifacts
         if: steps.build.outputs.release
@@ -44,3 +47,5 @@ jobs:
           artifacts: "./target/release/godot-package-manager"
           tag: ${{ steps.build.outputs.release }}
           body: "## gpm v${{ steps.build.outputs.release }} :tada:"
+          artifactErrorsFailBuild: true
+          allowUpdates: true

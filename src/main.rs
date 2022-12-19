@@ -13,7 +13,9 @@ use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "gpm")]
-#[command(about = "A package manager for godot", long_about = None)]
+#[command(about = "A package manager for godot.", long_about = None)]
+#[command(bin_name = "gpm")]
+/// A package mnanager for godot
 struct Args {
     #[command(subcommand)]
     action: Actions,
@@ -21,10 +23,21 @@ struct Args {
 
 #[derive(clap::Subcommand)]
 enum Actions {
+    #[command(about = "Update all wanted packaes. Installs packages does'nt yet exist.")]
     #[clap(short_flag = 'u')]
     Update,
+    #[command(about = "Deletes all installed packages.")]
     #[clap(short_flag = 'p')]
     Purge,
+    #[command(
+        about = "Prints a tree of all the wanted packages, and their dependencies.",
+        long_about = "
+Print a tree of all the wanted packages, and their dependencies.
+Produces output like
+/home/my-package
+└── @bendn/test@2.0.10
+    └── @bendn/gdcli@1.2.5"
+    )]
     Tree,
 }
 

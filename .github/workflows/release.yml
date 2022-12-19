@@ -24,23 +24,27 @@ jobs:
       - name: checkout
         uses: actions/checkout@v3
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cache01
+
       - name: build
         id: build
         run: |
           version="$(grep "version = " Cargo.toml | head -n 1 | awk -F '"' '{ print $2 }')"
-          [[ $(git tag | grep -c "$version") != 0 ]] && exit 0
+          # [[ $(git tag | grep -c "$version") != 0 ]] && exit 0
           echo "release=$version" >> $GITHUB_OUTPUT
           echo "## building" > $GITHUB_STEP_SUMMARY
           cargo build -r
+          ls target/release
           echo "## releasing" > $GITHUB_STEP_SUMMARY
-
-      - uses: Swatinem/rust-cache@v2
-        if: steps.build.outputs.release
 
       - name: release artifacts
         if: steps.build.outputs.release
-        uses: ncipollo/release-action@v1.10.0
+        uses: ncipollo/release-action@v1.12.0
         with:
           artifacts: "./target/release/godot-package-manager"
           tag: ${{ steps.build.outputs.release }}
           body: "## gpm v${{ steps.build.outputs.release }} :tada:"
+          artifactErrorsFailBuild: true
+          allowUpdates: true

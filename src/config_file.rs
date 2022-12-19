@@ -2,6 +2,7 @@ use crate::package::Package;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::write;
+use std::path::PathBuf;
 
 #[derive(Debug, Default)]
 pub struct ConfigFile {
@@ -15,14 +16,13 @@ struct PackageLock {
 }
 
 impl ConfigFile {
-    pub fn new() -> Self {
+    pub fn new(path: PathBuf) -> Self {
         #[derive(Debug, Deserialize, Default)]
         #[serde(default)]
         struct W {
             packages: HashMap<String, String>,
         }
-        let contents =
-            &std::fs::read_to_string("godot.package").expect("The config file should exist");
+        let contents = &std::fs::read_to_string(path).expect("The config file should exist");
         #[rustfmt::skip]
         let cfg: W = if let Ok(w) = deser_hjson::from_str(contents) { w }
                      else if let Ok(w) = serde_yaml::from_str(contents) { w }

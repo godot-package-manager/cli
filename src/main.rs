@@ -9,7 +9,7 @@ use std::env::current_dir;
 use std::fs::{create_dir, read_dir, remove_dir};
 use std::io::Result;
 use std::panic;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "gpm")]
@@ -19,11 +19,18 @@ use std::path::Path;
 struct Args {
     #[command(subcommand)]
     action: Actions,
+    #[arg(
+        short = 'c',
+        long = "cfg-file",
+        default_value = "godot.package",
+        global = true
+    )]
+    config_file: PathBuf,
 }
 
 #[derive(clap::Subcommand)]
 enum Actions {
-    #[command(about = "Update all wanted packaes. Installs packages doesn't yet exist.")]
+    #[command(about = "Update all wanted packaes. Installs packages if they don't yet exist.")]
     #[clap(short_flag = 'u')]
     Update,
     #[command(about = "Deletes all installed packages.")]
@@ -55,21 +62,21 @@ fn main() {
         else { println!("unknown"); };
     }));
     let args = Args::parse();
+    let cfg_file = ConfigFile::new(args.config_file);
     match args.action {
-        Actions::Update => update(),
-        Actions::Purge => purge(),
-        Actions::Tree => tree(),
+        Actions::Update => update(cfg_file),
+        Actions::Purge => purge(cfg_file),
+        Actions::Tree => tree(cfg_file),
     }
+    println!("Finished");
 }
 
-fn update() {
+fn update(mut cfg: ConfigFile) {
     if !Path::new("./addons/").exists() {
         create_dir("./addons/").expect("Should be able to create addons folder");
     }
-    let mut cfg = ConfigFile::new();
     if cfg.packages.is_empty() {
-        println!("No packages to update (modify the \"godot.package\" file to add packages)");
-        return;
+        panic!("No packages to update (modify the \"godot.package\" file to add packages)");
     }
     println!(
         "Update {} package{}",
@@ -93,20 +100,19 @@ fn recursive_delete_empty(dir: String) -> Result<()> {
     Ok(())
 }
 
-fn purge() {
-    let mut cfg = ConfigFile::new();
+fn purge(mut cfg: ConfigFile) {
     let packages = cfg
         .collect()
         .into_iter()
         .filter(|p| p.is_installed())
         .collect::<Vec<Package>>();
     if packages.is_empty() {
-        return if cfg.packages.is_empty() {
-            println!("No packages to update (modify the \"godot.package\" file to add packages)")
+        if cfg.packages.is_empty() {
+            panic!("No packages to update (modify the \"godot.package\" file to add packages)")
         } else {
-            println!("No packages installed(use \"gpm --update\" to install packages)")
+            panic!("No packages installed(use \"gpm --update\" to install packages)")
         };
-    }
+    };
     println!(
         "Purge {} package{}",
         packages.len(),
@@ -117,22 +123,19 @@ fn purge() {
     // run multiple times because the algorithm goes from top to bottom, stupidly.
     for _ in 0..3 {
         if let Err(e) = recursive_delete_empty("./addons".to_string()) {
-            println!("Unable to remove empty directorys: {e}")
+            eprintln!("Unable to remove empty directorys: {e}")
         }
     }
     cfg.lock();
 }
 
-fn tree() {
-    println!(
-        "{}",
-        if let Ok(s) = current_dir() {
-            s.to_string_lossy().into()
-        } else {
-            String::from(".")
-        }
-    );
-    iter(ConfigFile::new().packages, "");
+fn tree(cfg: ConfigFile) {
+    if let Ok(s) = current_dir() {
+        println!("{}", s.to_string_lossy().to_string());
+    } else {
+        println!(".");
+    };
+    iter(cfg.packages, "");
     fn iter(packages: Vec<Package>, prefix: &str) {
         let mut index = packages.len();
         for p in packages {

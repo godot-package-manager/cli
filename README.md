@@ -20,7 +20,3 @@ gpm tree # prints the tree of installed packages, looks like
 # └── @bendn/test@2.0.10
 #    └── @bendn/gdcli@1.2.5
 ```
-
-## TODO
-
-- Automatically add packages listed in `godot.lock` to the user's `.gitignore`

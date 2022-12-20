@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone, Eq, PartialEq, Ord, Default)]
 /// Struct for representing a package manifest, produced from `https://registry.npmjs.org/name/ver`.
-/// many propertys are discarded, only tarballs and integrity hashes are kept
+/// Many property's are discarded, only tarballs and integrity hashes are kept
 pub struct NpmManifest {
     pub tarball: String,
     pub integrity: String,

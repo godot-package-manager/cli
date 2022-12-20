@@ -20,7 +20,7 @@ struct PackageLock {
 
 impl ConfigFile {
     /// Creates a new [ConfigFile] from the given path.
-    /// Panics if the file doesn't exist, or cant parse as toml, hjson or yaml.
+    /// Panics if the file doesn't exist, or the file cant be parsed as toml, hjson or yaml.
     pub fn new(path: PathBuf) -> Self {
         #[derive(Debug, Deserialize, Default)]
         #[serde(default)]

@@ -82,7 +82,7 @@ impl ConfigFile {
     }
 
     /// Collect all the packages, and their dependencys.
-    /// Uses clones, because i wasnt able to get references to work
+    /// Uses clones, because I wasn't able to get references to work
     pub fn collect(&mut self) -> Vec<Package> {
         let mut pkgs: Vec<Package> = vec![];
         self.for_each(|p| pkgs.push(p.clone()));

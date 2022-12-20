@@ -210,7 +210,7 @@ impl Package {
 
 // package modification block
 /// Converts a absolute path to a relative path, with a cwd.
-/// a/b/c, cwd b => ./c
+/// `a/b/c`, cwd `b` => `./c`.
 fn absolute_to_relative(path: &String, cwd: &String) -> String {
     let mut common = cwd.clone();
     let mut result = String::from("");

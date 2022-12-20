@@ -12,9 +12,8 @@ use tar::Archive;
 const REGISTRY: &str = "https://registry.npmjs.org";
 
 #[derive(Clone, Eq, PartialEq, Ord)]
-/// The package object.
-/// This struct is the powerhouse of the entire system,
-/// and manages
+/// The package struct.
+/// This struct is the powerhouse of the entire system, and manages
 /// - installation
 /// - modification (of the loads, so they load the right stuff)
 /// - removal

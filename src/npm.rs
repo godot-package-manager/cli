@@ -47,7 +47,7 @@ impl NpmConfig {
         }
     }
 
-    /// instances a new [NpmConfig] from a vector of [Package]s
+    /// Instantiates a new [NpmConfig] from a vector of [Package]s.
     pub fn new(dependencies: Vec<Package>) -> Self {
         Self { dependencies }
     }

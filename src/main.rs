@@ -146,7 +146,7 @@ fn tree(cfg: ConfigFile) {
     iter(cfg.packages, "");
     fn iter(packages: Vec<Package>, prefix: &str) {
         // the index is used to decide if the package is the last package,
-        // so we can use a corner instead of a t
+        // so we can use a corner instead of a T.
         let mut index = packages.len();
         for p in packages {
             let name = p.to_string();

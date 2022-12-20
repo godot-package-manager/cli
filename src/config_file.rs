@@ -5,17 +5,22 @@ use std::fs::write;
 use std::path::PathBuf;
 
 #[derive(Debug, Default)]
+/// The config file: parsed from godot.package, usually.
+/// Contains only a list of [Package]s, currently.
 pub struct ConfigFile {
     pub packages: Vec<Package>,
     // hooks: there are no hooks now
 }
 #[derive(Debug, Serialize)]
+/// A package lock object. goes into the godot.lock file.
 struct PackageLock {
     version: String,
     integrity: String,
 }
 
 impl ConfigFile {
+    /// Creates a new [ConfigFile] from the given path.
+    /// Panics if the file doesn't exist, or cant parse as toml, hjson or yaml.
     pub fn new(path: PathBuf) -> Self {
         #[derive(Debug, Deserialize, Default)]
         #[serde(default)]
@@ -38,6 +43,8 @@ impl ConfigFile {
         cfg_file
     }
 
+    /// Creates a lockfile for this config file.
+    /// note: Lockfiles are currently unused.
     pub fn lock(&mut self) {
         write(
             "./godot.lock",
@@ -56,6 +63,7 @@ impl ConfigFile {
         .expect("Writing lock file should work");
     }
 
+    /// Iterates over all the packages (and their deps) in this config file.
     fn _for_each(pkgs: &mut [Package], mut cb: impl FnMut(&mut Package)) {
         fn inner(pkgs: &mut [Package], cb: &mut impl FnMut(&mut Package)) {
             for p in pkgs {
@@ -68,10 +76,13 @@ impl ConfigFile {
         inner(pkgs, &mut cb);
     }
 
+    /// Public wrapper for _for_each, but with the initial value filled out.
     pub fn for_each(&mut self, cb: impl FnMut(&mut Package)) {
         Self::_for_each(&mut self.packages, cb)
     }
 
+    /// Collect all the packages, and their dependencys.
+    /// Uses clones, because i wasnt able to get references to work
     pub fn collect(&mut self) -> Vec<Package> {
         let mut pkgs: Vec<Package> = vec![];
         self.for_each(|p| pkgs.push(p.clone()));
@@ -80,6 +91,9 @@ impl ConfigFile {
 }
 
 impl PackageLock {
+    /// Create a new [PackageLock] from a [Package], so it can be serialized easily.
+    /// Theres probably a way to make serialization of [Package] just ignore certain fields,
+    /// so this wouldnt be necessary.
     fn new(mut pkg: Package) -> Self {
         if pkg.meta.npm_manifest.integrity.is_empty() {
             pkg.get_manifest()

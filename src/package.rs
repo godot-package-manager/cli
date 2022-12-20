@@ -12,6 +12,12 @@ use tar::Archive;
 const REGISTRY: &str = "https://registry.npmjs.org";
 
 #[derive(Clone, Eq, PartialEq, Ord)]
+/// The package object.
+/// This struct is the powerhouse of the entire system,
+/// and manages
+/// - installation
+/// - modification (of the loads, so they load the right stuff)
+/// - removal
 pub struct Package {
     pub name: String,
     pub version: String,
@@ -19,6 +25,8 @@ pub struct Package {
 }
 
 #[derive(Clone, Eq, PartialEq, Ord, Default)]
+/// The metadata of a [Package].
+/// Stores dependency data.
 pub struct PackageMeta {
     pub npm_manifest: NpmManifest,
     pub dependencies: Vec<Package>,
@@ -37,10 +45,15 @@ impl PartialOrd for PackageMeta {
 }
 
 impl Package {
+    /// Does this package have dependencies?
     pub fn has_deps(&self) -> bool {
         !self.meta.dependencies.is_empty()
     }
 
+    /// Creates a new [Package] from a name and version.
+    /// Calls the Package::get_deps() function, so it will
+    /// try to access the fs, and if it fails, it will make
+    /// calls to cdn.jsdelivr.net to get the `package.json` file.
     pub fn new(name: String, version: String) -> Package {
         let mut p = Package {
             meta: PackageMeta::default(),
@@ -51,20 +64,25 @@ impl Package {
         p
     }
 
+    /// Stringifies this [Package], format my_p@1.0.0.
     pub fn to_string(&self) -> String {
         format!("{}@{}", self.name, self.version)
     }
 
+    /// Returns wether this package is installed.
     pub fn is_installed(&self) -> bool {
         Path::new(&self.download_dir()).exists()
     }
 
+    /// Deletes this [Package].
     pub fn purge(&self) {
         if self.is_installed() {
             remove_dir_all(self.download_dir()).expect("Should be able to remove download dir");
         }
     }
 
+    /// Installs this [Package] to a download directory,
+    /// depending on wether this package is a direct dependency or not.
     pub fn download(&mut self) {
         println!("Downloading {self}");
         self.purge();
@@ -86,7 +104,7 @@ impl Package {
             .read_to_end(&mut bytes)
             .expect("Tarball should be bytes");
 
-        /// tar xzf archive --strip-components=1 --directory=P
+        /// Emulates `tar xzf archive --strip-components=1 --directory=P`.
         pub fn unpack<P, R>(mut archive: Archive<R>, dst: P) -> io::Result<()>
         where
             P: AsRef<Path>,
@@ -118,6 +136,9 @@ impl Package {
         self.modify();
     }
 
+    /// Gets the [NpmConfig] for this [Package].
+    /// Will attempt to read the `package.json` file, if this package is installed.
+    /// Else it will make network calls to `cdn.jsdelivr.net`.
     pub fn get_config_file(&self) -> NpmConfig {
         fn get(f: String) -> io::Result<String> {
             read_to_string(Path::new(&f).join("package.json"))
@@ -144,6 +165,7 @@ impl Package {
         .expect("The package config file should be correct/valid JSON")
     }
 
+    /// Gets the [NpmManifest], and puts it in `self.meta.npm_manifest`.
     pub fn get_manifest(&mut self) {
         #[derive(Debug, Deserialize)]
         struct W {
@@ -167,6 +189,7 @@ impl Package {
             .dist;
     }
 
+    /// Returns the download directory for this package depending on wether it is indirect or not.
     fn download_dir(&self) -> String {
         if self.meta.indirect {
             self.indirect_download_dir()
@@ -175,16 +198,20 @@ impl Package {
         }
     }
 
+    /// The download directory if this package is a direct dep.
     fn direct_download_dir(&self) -> String {
         format!("./addons/{}", self.name)
     }
 
+    /// The download directory if this package is a indirect dep.
     fn indirect_download_dir(&self) -> String {
         format!("./addons/__gpm_deps/{}/{}", self.name, self.version)
     }
 }
 
 // package modification block
+/// Converts a absolute path to a relative path, with a cwd.
+/// a/b/c, cwd b => ./c
 fn absolute_to_relative(path: &String, cwd: &String) -> String {
     let mut common = cwd.clone();
     let mut result = String::from("");
@@ -211,6 +238,7 @@ fn absolute_to_relative(path: &String, cwd: &String) -> String {
 }
 
 impl Package {
+    /// Gets the dependencies of this [Package], placing them in `self.meta.dependencies`.
     fn get_deps(&mut self) -> &Vec<Package> {
         let cfg = self.get_config_file();
         cfg.dependencies.into_iter().for_each(|mut dep| {
@@ -220,6 +248,18 @@ impl Package {
         &self.meta.dependencies
     }
 
+    /// Modifies the loads of a GDScript script.
+    /// ```gdscript
+    /// extends Node
+    ///
+    /// const Wow = preload("res://addons/my_awesome_addon/wow.gd")
+    /// ```
+    /// =>
+    /// ```gdscript
+    /// # --snip--
+    /// const Wow = preload("../my_awesome_addon/wow.gd")
+    /// ```
+    /// (depending on the supplied cwd)
     fn modify_script_loads(&self, t: &String, cwd: &String) -> String {
         lazy_static::lazy_static! {
             static ref SCRIPT_LOAD_R: Regex = Regex::new("(pre)?load\\([\"']([^)]+)['\"]\\)").unwrap();
@@ -238,6 +278,20 @@ impl Package {
             })
             .to_string()
     }
+
+    /// Modifies the loads of a godot TextResource.
+    /// ```gdresource
+    /// [gd_scene load_steps=1 format=2]
+    ///
+    /// [ext_resource path="res://addons/my_awesome_addon/wow.gd" type="Script" id=1]
+    /// ```
+    /// =>
+    /// ```gdresource
+    /// --snip--
+    /// [ext_resource path="../my_awesome_addon/wow.gd" type="Script" id=1]
+    /// ```
+    /// depending on supplied cwd.
+    /// godot will automatically re-absolute-ify the path, but that is fine.
     fn modify_tres_loads(&self, t: &String, cwd: &String) -> String {
         lazy_static::lazy_static! {
             static ref TRES_LOAD_R: Regex = Regex::new("[ext_resource path=\"([^\"]+)\"").unwrap();
@@ -256,6 +310,7 @@ impl Package {
             .to_string()
     }
 
+    /// The backend for modify_script_loads and modify_tres_loads.
     fn modify_load(&self, path: String, relative_allowed: bool, cwd: &String) -> String {
         let path_p = Path::new(&path);
         if path_p.exists() || Path::new(cwd).join(path_p).exists() {
@@ -294,6 +349,7 @@ impl Package {
         return format!("res://{path}");
     }
 
+    /// Recursively modifies a directory.
     fn recursive_modify(&self, dir: String, deps: &Vec<Package>) -> io::Result<()> {
         for entry in read_dir(&dir)? {
             let p = entry?;
@@ -331,6 +387,7 @@ impl Package {
         Ok(())
     }
 
+    /// The catalyst for `recursive_modify`.
     pub fn modify(&self) {
         if self.is_installed() == false {
             panic!("Attempting to modify a package that is not installed");

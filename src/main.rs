@@ -94,7 +94,7 @@ fn update(mut cfg: ConfigFile) {
 ///      `-- dir2
 /// ```
 /// dir 1 and 2 will be deleted.
-/// run multiple times to delete dir0.
+/// Run multiple times to delete `dir0`.
 fn recursive_delete_empty(dir: String) -> Result<()> {
     if read_dir(&dir)?.next().is_none() {
         return remove_dir(dir);

@@ -20,7 +20,7 @@ impl PartialOrd for NpmManifest {
 
 #[derive(Debug, Default)]
 /// struct for representing a package.json file
-/// we only care about the dependencies
+/// We only care about the dependencies.
 pub struct NpmConfig {
     pub dependencies: Vec<Package>,
 }

@@ -93,7 +93,7 @@ impl ConfigFile {
 impl PackageLock {
     /// Create a new [PackageLock] from a [Package], so it can be serialized easily.
     /// Theres probably a way to make serialization of [Package] just ignore certain fields,
-    /// so this wouldnt be necessary.
+    /// so this wouldn't be necessary.
     fn new(mut pkg: Package) -> Self {
         if pkg.meta.npm_manifest.integrity.is_empty() {
             pkg.get_manifest()

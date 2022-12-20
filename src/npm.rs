@@ -26,7 +26,8 @@ pub struct NpmConfig {
 }
 
 impl NpmConfig {
-    /// make a [NpmConfig] from a json [String]
+    /// Make a [NpmConfig] from a json [String].
+    /// JSON **must** contain a dependencies field.
     pub fn from_json(json: &String) -> Result<NpmConfig, Error> {
         #[derive(Debug, Deserialize, Default)]
         #[serde(default)]

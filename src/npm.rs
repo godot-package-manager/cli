@@ -5,7 +5,7 @@ use serde_json::Error;
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone, Eq, PartialEq, Ord, Default)]
-/// struct for representing a NPMManifest, produced from https://registry.npmjs.org/name/ver
+/// Struct for representing a package manifest, produced from `https://registry.npmjs.org/name/ver`.
 /// many propertys are discarded, only tarballs and integrity hashes are kept
 pub struct NpmManifest {
     pub tarball: String,

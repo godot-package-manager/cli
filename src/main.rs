@@ -23,7 +23,8 @@ struct Args {
         short = 'c',
         long = "cfg-file",
         default_value = "godot.package",
-        global = true
+        global = true,
+        help = "Specify the location of the package configuration file (https://github.com/godot-package-manager#godotpackage)"
     )]
     config_file: PathBuf,
 }

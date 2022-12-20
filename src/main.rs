@@ -86,7 +86,7 @@ fn update(mut cfg: ConfigFile) {
 }
 
 /// Recursively deletes empty directories.
-/// with this tree:
+/// With this fs tree:
 /// ```
 /// .
 /// `-- dir0

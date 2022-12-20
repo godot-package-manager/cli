@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 #[derive(Parser)]
 #[command(name = "gpm")]
 #[command(bin_name = "gpm")]
-/// A package manager for godot
+/// A package manager for godot.
 struct Args {
     #[command(subcommand)]
     action: Actions,
@@ -24,14 +24,14 @@ struct Args {
         default_value = "godot.package",
         global = true
     )]
-    /// Specify the location of the package configuration file (https://github.com/godot-package-manager#godotpackage)
+    /// Specify the location of the package configuration file (https://github.com/godot-package-manager#godotpackage).
     config_file: PathBuf,
 }
 
 #[derive(clap::Subcommand)]
 enum Actions {
     #[clap(short_flag = 'u')]
-    /// Downloads the latest versions of your wanted packages
+    /// Downloads the latest versions of your wanted packages.
     Update,
     #[clap(short_flag = 'p')]
     /// Deletes all installed packages.

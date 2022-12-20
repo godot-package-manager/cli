@@ -12,7 +12,7 @@ pub struct ConfigFile {
     // hooks: there are no hooks now
 }
 #[derive(Debug, Serialize)]
-/// A package lock object. goes into the godot.lock file.
+/// A package lock object. Goes into the godot.lock file.
 struct PackageLock {
     version: String,
     integrity: String,

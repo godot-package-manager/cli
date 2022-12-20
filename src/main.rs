@@ -13,9 +13,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "gpm")]
-#[command(about = "A package manager for godot.", long_about = None)]
 #[command(bin_name = "gpm")]
-/// A package mnanager for godot
+/// A package manager for godot.
 struct Args {
     #[command(subcommand)]
     action: Actions,
@@ -23,29 +22,27 @@ struct Args {
         short = 'c',
         long = "cfg-file",
         default_value = "godot.package",
-        global = true,
-        help = "Specify the location of the package configuration file (https://github.com/godot-package-manager#godotpackage)"
+        global = true
     )]
+    /// Specify the location of the package configuration file (https://github.com/godot-package-manager#godotpackage).
     config_file: PathBuf,
 }
 
 #[derive(clap::Subcommand)]
 enum Actions {
-    #[command(about = "Update all wanted packaes. Installs packages if they don't yet exist.")]
     #[clap(short_flag = 'u')]
+    /// Downloads the latest versions of your wanted packages.
     Update,
-    #[command(about = "Deletes all installed packages.")]
     #[clap(short_flag = 'p')]
+    /// Deletes all installed packages.
     Purge,
-    #[command(
-        about = "Prints a tree of all the wanted packages, and their dependencies.",
-        long_about = "
+    /// Prints a tree of all the wanted packages, and their dependencies.
+    #[command(long_about = "
 Print a tree of all the wanted packages, and their dependencies.
 Produces output like
 /home/my-package
 └── @bendn/test@2.0.10
-    └── @bendn/gdcli@1.2.5"
-    )]
+    └── @bendn/gdcli@1.2.5")]
     Tree,
 }
 
@@ -88,6 +85,16 @@ fn update(mut cfg: ConfigFile) {
     cfg.lock();
 }
 
+/// Recursively deletes empty directories.
+/// With this fs tree:
+/// ```
+/// .
+/// `-- dir0
+///      |-- dir1
+///      `-- dir2
+/// ```
+/// dir 1 and 2 will be deleted.
+/// Run multiple times to delete `dir0`.
 fn recursive_delete_empty(dir: String) -> Result<()> {
     if read_dir(&dir)?.next().is_none() {
         return remove_dir(dir);
@@ -138,6 +145,8 @@ fn tree(cfg: ConfigFile) {
     };
     iter(cfg.packages, "");
     fn iter(packages: Vec<Package>, prefix: &str) {
+        // the index is used to decide if the package is the last package,
+        // so we can use a corner instead of a T.
         let mut index = packages.len();
         for p in packages {
             let name = p.to_string();

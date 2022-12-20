@@ -5,6 +5,8 @@ use serde_json::Error;
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone, Eq, PartialEq, Ord, Default)]
+/// Struct for representing a package manifest, produced from `https://registry.npmjs.org/name/ver`.
+/// Many property's are discarded, only tarballs and integrity hashes are kept
 pub struct NpmManifest {
     pub tarball: String,
     pub integrity: String,
@@ -17,11 +19,15 @@ impl PartialOrd for NpmManifest {
 }
 
 #[derive(Debug, Default)]
+/// Struct for representing a addons `package.json` file.
+/// We only care about the dependencies.
 pub struct NpmConfig {
     pub dependencies: Vec<Package>,
 }
 
 impl NpmConfig {
+    /// Make a [NpmConfig] from a json [String].
+    /// JSON **must** contain a dependencies field.
     pub fn from_json(json: &String) -> Result<NpmConfig, Error> {
         #[derive(Debug, Deserialize, Default)]
         #[serde(default)]
@@ -41,6 +47,7 @@ impl NpmConfig {
         }
     }
 
+    /// Instantiates a new [NpmConfig] from a vector of [Package]s.
     pub fn new(dependencies: Vec<Package>) -> Self {
         Self { dependencies }
     }

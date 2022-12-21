@@ -1,5 +1,3 @@
-{
-	"packages": {
-		"@bendn/test": "2.0.10"
-	}
+packages: {
+	@bendn/test: 2.0.10
 }

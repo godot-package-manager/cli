@@ -1,12 +1,11 @@
 mod config_file;
-mod npm;
 mod package;
 
 use crate::package::Package;
 use clap::Parser;
 use config_file::ConfigFile;
 use std::env::current_dir;
-use std::fs::{create_dir, read_dir, remove_dir, write};
+use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read, Result};
 use std::panic;
 use std::path::{Path, PathBuf};
@@ -77,8 +76,7 @@ fn main() {
             panic!("Stdin should not be empty");
         };
     } else {
-        contents =
-            std::fs::read_to_string(args.config_file).expect("Reading config file should be ok");
+        contents = read_to_string(args.config_file).expect("Reading config file should be ok");
     };
     let mut cfg_file = ConfigFile::new(&contents);
     match args.action {
@@ -177,7 +175,7 @@ fn tree(cfg: &ConfigFile) {
             println!("{prefix}{} {name}", if index != 0 { "├──" } else { "└──" });
             if p.has_deps() {
                 iter(
-                    &p.meta.dependencies,
+                    &p.dependencies,
                     &format!("{prefix}{}   ", if index != 0 { '│' } else { ' ' }),
                 );
             }

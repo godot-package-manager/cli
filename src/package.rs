@@ -1,8 +1,7 @@
-use crate::npm::*;
-use core::cmp::Ordering;
+use crate::config_file::ConfigFile;
 use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, write};
 use std::io;
 use std::path::{Component::Normal, Path, PathBuf};
@@ -11,7 +10,7 @@ use tar::Archive;
 
 const REGISTRY: &str = "https://registry.npmjs.org";
 
-#[derive(Clone, Eq, PartialEq, Ord)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Serialize, Debug)]
 /// The package struct.
 /// This struct is the powerhouse of the entire system, and manages
 /// - installation
@@ -20,33 +19,27 @@ const REGISTRY: &str = "https://registry.npmjs.org";
 pub struct Package {
     pub name: String,
     pub version: String,
-    pub meta: PackageMeta,
-}
-
-#[derive(Clone, Eq, PartialEq, Ord, Default)]
-/// The metadata of a [Package].
-/// Stores dependency data.
-pub struct PackageMeta {
+    #[serde(flatten)]
     pub npm_manifest: NpmManifest,
+    #[serde(skip)]
     pub dependencies: Vec<Package>,
+    #[serde(skip)]
     pub indirect: bool,
 }
 
-impl PartialOrd for Package {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        return Some(self.name.cmp(&other.name));
-    }
-}
-impl PartialOrd for PackageMeta {
-    fn partial_cmp(&self, _other: &Self) -> Option<Ordering> {
-        return Some(Ordering::Equal);
-    }
+#[derive(Debug, Deserialize, Clone, Eq, Ord, PartialEq, PartialOrd, Default, Serialize)]
+/// Struct for representing a package manifest, produced from `https://registry.npmjs.org/name/ver`.
+/// Many property's are discarded, only tarballs and integrity hashes are kept
+pub struct NpmManifest {
+    #[serde(skip_serializing)]
+    pub tarball: String,
+    pub integrity: String,
 }
 
 impl Package {
     /// Does this package have dependencies?
     pub fn has_deps(&self) -> bool {
-        !self.meta.dependencies.is_empty()
+        !self.dependencies.is_empty()
     }
 
     /// Creates a new [Package] from a name and version.
@@ -54,11 +47,9 @@ impl Package {
     /// try to access the fs, and if it fails, it will make
     /// calls to cdn.jsdelivr.net to get the `package.json` file.
     pub fn new(name: String, version: String) -> Package {
-        let mut p = Package {
-            meta: PackageMeta::default(),
-            name,
-            version,
-        };
+        let mut p = Package::default();
+        p.name = name;
+        p.version = version;
         p.get_deps();
         p
     }
@@ -85,10 +76,10 @@ impl Package {
     pub fn download(&mut self) {
         println!("Downloading {self}");
         self.purge();
-        if self.meta.npm_manifest.tarball.is_empty() {
+        if self.npm_manifest.tarball.is_empty() {
             self.get_manifest()
         };
-        let resp = ureq::get(&self.meta.npm_manifest.tarball)
+        let resp = ureq::get(&self.npm_manifest.tarball)
             .call()
             .expect("Tarball download should work");
 
@@ -135,10 +126,10 @@ impl Package {
         self.modify();
     }
 
-    /// Gets the [NpmConfig] for this [Package].
+    /// Gets the [ConfigFile] for this [Package].
     /// Will attempt to read the `package.json` file, if this package is installed.
     /// Else it will make network calls to `cdn.jsdelivr.net`.
-    pub fn get_config_file(&self) -> NpmConfig {
+    pub fn get_config_file(&self) -> ConfigFile {
         fn get(f: String) -> io::Result<String> {
             read_to_string(Path::new(&f).join("package.json"))
         }
@@ -147,11 +138,11 @@ impl Package {
                                 else if let Ok(c) = get(self.download_dir()) { Some(c) }
                                 else { None };
         if let Some(c) = c {
-            if let Ok(n) = NpmConfig::from_json(&c) {
+            if let Ok(n) = ConfigFile::from_json(&c) {
                 return n;
             }
         }
-        NpmConfig::from_json(
+        ConfigFile::from_json(
             &ureq::get(&format!(
                 "https://cdn.jsdelivr.net/npm/{}@{}/package.json",
                 self.name, self.version,
@@ -164,7 +155,7 @@ impl Package {
         .expect("The package config file should be correct/valid JSON")
     }
 
-    /// Gets the [NpmManifest], and puts it in `self.meta.npm_manifest`.
+    /// Gets the [NpmManifest], and puts it in `self.npm_manifest`.
     pub fn get_manifest(&mut self) {
         #[derive(Debug, Deserialize)]
         struct W {
@@ -183,14 +174,14 @@ impl Package {
                 self.name, self.version
             )
         }
-        self.meta.npm_manifest = serde_json::from_str::<W>(&resp)
+        self.npm_manifest = serde_json::from_str::<W>(&resp)
             .expect("The package manifest file should be correct/valid JSON")
             .dist;
     }
 
     /// Returns the download directory for this package depending on wether it is indirect or not.
     fn download_dir(&self) -> String {
-        if self.meta.indirect {
+        if self.indirect {
             self.indirect_download_dir()
         } else {
             self.direct_download_dir()
@@ -237,14 +228,14 @@ fn absolute_to_relative(path: &String, cwd: &String) -> String {
 }
 
 impl Package {
-    /// Gets the dependencies of this [Package], placing them in `self.meta.dependencies`.
+    /// Gets the dependencies of this [Package], placing them in `self.dependencies`.
     fn get_deps(&mut self) -> &Vec<Package> {
         let cfg = self.get_config_file();
-        cfg.dependencies.into_iter().for_each(|mut dep| {
-            dep.meta.indirect = true;
-            self.meta.dependencies.push(dep);
+        cfg.packages.into_iter().for_each(|mut dep| {
+            dep.indirect = true;
+            self.dependencies.push(dep);
         });
-        &self.meta.dependencies
+        &self.dependencies
     }
 
     /// Modifies the loads of a GDScript script.
@@ -323,7 +314,7 @@ impl Package {
         }
         if let Some(c) = path_p.components().nth(1) {
             let mut cfg = HashMap::<String, String>::new();
-            for pkg in &self.meta.dependencies {
+            for pkg in &self.dependencies {
                 cfg.insert(pkg.name.clone(), pkg.download_dir());
                 if let Some((_, s)) = pkg.name.split_once("/") {
                     cfg.insert(String::from(s), pkg.download_dir()); // unscoped (@ben/cli => cli) (for compat)
@@ -391,19 +382,13 @@ impl Package {
         if self.is_installed() == false {
             panic!("Attempting to modify a package that is not installed");
         }
-        if let Err(e) = self.recursive_modify(self.download_dir(), &self.meta.dependencies) {
+        if let Err(e) = self.recursive_modify(self.download_dir(), &self.dependencies) {
             println!("Modification of {self} yielded error {e}");
         }
     }
 }
 
 impl fmt::Display for Package {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.to_string())
-    }
-}
-
-impl fmt::Debug for Package {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.to_string())
     }

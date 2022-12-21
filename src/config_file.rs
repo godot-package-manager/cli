@@ -1,5 +1,6 @@
 use crate::package::Package;
 use serde::{Deserialize, Serialize};
+use serde_json::Result;
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]
@@ -16,42 +17,57 @@ struct PackageLock {
     integrity: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+/// A wrapper to [ConfigFile]. This _is_ necessary.
+/// Any alternatives will end up being more ugly than this. (trust me i tried)
+/// There is no way to automatically deserialize the map into a vec.
+struct ConfigWrapper {
+    // support NPM package.json files (also allows gpm -c package.json -u)
+    #[serde(alias = "dependencies")]
+    packages: HashMap<String, String>,
+}
+
+impl From<ConfigWrapper> for ConfigFile {
+    fn from(from: ConfigWrapper) -> Self {
+        Self {
+            packages: from
+                .packages
+                .into_iter()
+                .map(|(name, version)| Package::new(name, version))
+                .collect::<Vec<Package>>(),
+        }
+    }
+}
+
 impl ConfigFile {
     /// Creates a new [ConfigFile] from the given path.
     /// Panics if the file doesn't exist, or the file cant be parsed as toml, hjson or yaml.
     pub fn new(contents: &String) -> Self {
-        #[derive(Debug, Deserialize, Default)]
-        #[serde(default)]
-        struct W {
-            packages: HashMap<String, String>,
-        }
+        type W = ConfigWrapper;
         #[rustfmt::skip]
-        let cfg: W = if let Ok(w) = deser_hjson::from_str(contents) { w }
-                     else if let Ok(w) = serde_yaml::from_str(contents) { w }
-                     else if let Ok(w) = toml::from_str(contents) { w }
-                     else { panic!("Failed to parse the config file") };
-        let mut cfg_file = ConfigFile::default();
-        cfg_file.packages = cfg
-            .packages
-            .into_iter()
-            .map(|(name, version)| Package::new(name, version))
-            .collect();
-        cfg_file.packages.sort();
-        cfg_file
+        let mut cfg: ConfigFile =
+            if let Ok(w) = deser_hjson::from_str::<W>(contents) { w.into() }
+            else if let Ok(w) = serde_yaml::from_str::<W>(contents) { w.into() }
+            else if let Ok(w) = toml::from_str::<W>(contents) { w.into() }
+            else { panic!("Failed to parse the config file") };
+        cfg.packages.sort();
+        cfg
+    }
+
+    pub fn from_json(json: &String) -> Result<Self> {
+        Ok(serde_json::from_str::<ConfigWrapper>(json)?.into())
     }
 
     /// Creates a lockfile for this config file.
     /// note: Lockfiles are currently unused.
     pub fn lock(&mut self) -> String {
-        serde_json::to_string(
+        serde_json::to_string_pretty(
             &self
                 .collect()
                 .into_iter()
-                .filter_map(|p| {
-                    p.is_installed()
-                        .then_some((p.name.clone(), PackageLock::new(p)))
-                })
-                .collect::<HashMap<String, PackageLock>>(),
+                .filter(|p| p.is_installed())
+                .collect::<Vec<Package>>(),
         )
         .unwrap()
     }
@@ -62,7 +78,7 @@ impl ConfigFile {
             for p in pkgs {
                 cb(p);
                 if p.has_deps() {
-                    inner(&mut p.meta.dependencies, cb);
+                    inner(&mut p.dependencies, cb);
                 }
             }
         }
@@ -80,20 +96,5 @@ impl ConfigFile {
         let mut pkgs: Vec<Package> = vec![];
         self.for_each(|p| pkgs.push(p.clone()));
         pkgs
-    }
-}
-
-impl PackageLock {
-    /// Create a new [PackageLock] from a [Package], so it can be serialized easily.
-    /// Theres probably a way to make serialization of [Package] just ignore certain fields,
-    /// so this wouldn't be necessary.
-    fn new(mut pkg: Package) -> Self {
-        if pkg.meta.npm_manifest.integrity.is_empty() {
-            pkg.get_manifest()
-        };
-        Self {
-            version: pkg.version,
-            integrity: pkg.meta.npm_manifest.integrity,
-        }
     }
 }

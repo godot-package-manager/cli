@@ -45,9 +45,9 @@ impl ConfigFile {
 
     /// Creates a lockfile for this config file.
     /// note: Lockfiles are currently unused.
-    pub fn lock(&mut self) {
+    pub fn lock(&mut self, path: PathBuf) {
         write(
-            "./godot.lock",
+            path,
             serde_json::to_string(
                 &self
                     .collect()

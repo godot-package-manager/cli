@@ -26,6 +26,14 @@ struct Args {
     )]
     /// Specify the location of the package configuration file (https://github.com/godot-package-manager#godotpackage).
     config_file: PathBuf,
+    #[arg(
+        short = 'l',
+        long = "lock-file",
+        default_value = "godot.lock",
+        global = true
+    )]
+    /// Specify the location of the lock file
+    lock_file: PathBuf,
 }
 
 #[derive(clap::Subcommand)]
@@ -60,16 +68,17 @@ fn main() {
         else { println!("unknown"); };
     }));
     let args = Args::parse();
-    let cfg_file = ConfigFile::new(args.config_file);
+    let mut cfg_file = ConfigFile::new(args.config_file);
     match args.action {
-        Actions::Update => update(cfg_file),
-        Actions::Purge => purge(cfg_file),
-        Actions::Tree => tree(cfg_file),
+        Actions::Update => update(&mut cfg_file),
+        Actions::Purge => purge(&mut cfg_file),
+        Actions::Tree => tree(&cfg_file),
     }
+    cfg_file.lock(args.lock_file);
     println!("Finished");
 }
 
-fn update(mut cfg: ConfigFile) {
+fn update(cfg: &mut ConfigFile) {
     if !Path::new("./addons/").exists() {
         create_dir("./addons/").expect("Should be able to create addons folder");
     }
@@ -82,7 +91,6 @@ fn update(mut cfg: ConfigFile) {
         if cfg.packages.len() > 1 { "s" } else { "" }
     );
     cfg.for_each(|p| p.download());
-    cfg.lock();
 }
 
 /// Recursively deletes empty directories.
@@ -108,7 +116,7 @@ fn recursive_delete_empty(dir: String) -> Result<()> {
     Ok(())
 }
 
-fn purge(mut cfg: ConfigFile) {
+fn purge(cfg: &mut ConfigFile) {
     let packages = cfg
         .collect()
         .into_iter()
@@ -134,17 +142,16 @@ fn purge(mut cfg: ConfigFile) {
             eprintln!("Unable to remove empty directorys: {e}")
         }
     }
-    cfg.lock();
 }
 
-fn tree(cfg: ConfigFile) {
+fn tree(cfg: &ConfigFile) {
     if let Ok(s) = current_dir() {
         println!("{}", s.to_string_lossy().to_string());
     } else {
         println!(".");
     };
-    iter(cfg.packages, "");
-    fn iter(packages: Vec<Package>, prefix: &str) {
+    iter(&cfg.packages, "");
+    fn iter(packages: &Vec<Package>, prefix: &str) {
         // the index is used to decide if the package is the last package,
         // so we can use a corner instead of a T.
         let mut index = packages.len();
@@ -154,7 +161,7 @@ fn tree(cfg: ConfigFile) {
             println!("{prefix}{} {name}", if index != 0 { "├──" } else { "└──" });
             if p.has_deps() {
                 iter(
-                    p.meta.dependencies,
+                    &p.meta.dependencies,
                     &format!("{prefix}{}   ", if index != 0 { '│' } else { ' ' }),
                 );
             }

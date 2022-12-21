@@ -1,8 +1,6 @@
 use crate::package::Package;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::write;
-use std::path::PathBuf;
 
 #[derive(Debug, Default)]
 /// The config file: parsed from godot.package, usually.
@@ -21,13 +19,12 @@ struct PackageLock {
 impl ConfigFile {
     /// Creates a new [ConfigFile] from the given path.
     /// Panics if the file doesn't exist, or the file cant be parsed as toml, hjson or yaml.
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(contents: &String) -> Self {
         #[derive(Debug, Deserialize, Default)]
         #[serde(default)]
         struct W {
             packages: HashMap<String, String>,
         }
-        let contents = &std::fs::read_to_string(path).expect("The config file should exist");
         #[rustfmt::skip]
         let cfg: W = if let Ok(w) = deser_hjson::from_str(contents) { w }
                      else if let Ok(w) = serde_yaml::from_str(contents) { w }
@@ -45,22 +42,18 @@ impl ConfigFile {
 
     /// Creates a lockfile for this config file.
     /// note: Lockfiles are currently unused.
-    pub fn lock(&mut self, path: PathBuf) {
-        write(
-            path,
-            serde_json::to_string(
-                &self
-                    .collect()
-                    .into_iter()
-                    .filter_map(|p| {
-                        p.is_installed()
-                            .then_some((p.name.clone(), PackageLock::new(p)))
-                    })
-                    .collect::<HashMap<String, PackageLock>>(),
-            )
-            .unwrap(),
+    pub fn lock(&mut self) -> String {
+        serde_json::to_string(
+            &self
+                .collect()
+                .into_iter()
+                .filter_map(|p| {
+                    p.is_installed()
+                        .then_some((p.name.clone(), PackageLock::new(p)))
+                })
+                .collect::<HashMap<String, PackageLock>>(),
         )
-        .expect("Writing lock file should work");
+        .unwrap()
     }
 
     /// Iterates over all the packages (and their deps) in this config file.

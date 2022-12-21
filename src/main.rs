@@ -6,8 +6,8 @@ use crate::package::Package;
 use clap::Parser;
 use config_file::ConfigFile;
 use std::env::current_dir;
-use std::fs::{create_dir, read_dir, remove_dir};
-use std::io::Result;
+use std::fs::{create_dir, read_dir, remove_dir, write};
+use std::io::{stdin, Read, Result};
 use std::panic;
 use std::path::{Path, PathBuf};
 
@@ -24,7 +24,7 @@ struct Args {
         default_value = "godot.package",
         global = true
     )]
-    /// Specify the location of the package configuration file (https://github.com/godot-package-manager#godotpackage).
+    /// Specify the location of the package configuration file (https://github.com/godot-package-manager#godotpackage). If -, read from stdin.
     config_file: PathBuf,
     #[arg(
         short = 'l',
@@ -32,7 +32,7 @@ struct Args {
         default_value = "godot.lock",
         global = true
     )]
-    /// Specify the location of the lock file
+    /// Specify the location of the lock file. If -, print to stdout.
     lock_file: PathBuf,
 }
 
@@ -68,14 +68,30 @@ fn main() {
         else { println!("unknown"); };
     }));
     let args = Args::parse();
-    let mut cfg_file = ConfigFile::new(args.config_file);
+    let mut contents = String::from("");
+    if args.config_file == Path::new("-") {
+        let bytes = stdin()
+            .read_to_string(&mut contents)
+            .expect("Stdin read should be ok");
+        if bytes == 0 {
+            panic!("Stdin should not be empty");
+        };
+    } else {
+        contents =
+            std::fs::read_to_string(args.config_file).expect("Reading config file should be ok");
+    };
+    let mut cfg_file = ConfigFile::new(&contents);
     match args.action {
         Actions::Update => update(&mut cfg_file),
         Actions::Purge => purge(&mut cfg_file),
         Actions::Tree => tree(&cfg_file),
     }
-    cfg_file.lock(args.lock_file);
-    println!("Finished");
+    let lockfile = cfg_file.lock();
+    if args.lock_file == Path::new("-") {
+        println!("{lockfile}");
+    } else {
+        write(args.lock_file, lockfile).expect("Writing lock file should be ok");
+    }
 }
 
 fn update(cfg: &mut ConfigFile) {

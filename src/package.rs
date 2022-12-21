@@ -6,7 +6,7 @@ use std::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, write};
 use std::io;
 use std::path::{Component::Normal, Path, PathBuf};
 use std::{collections::HashMap, fmt};
-use tar::Archive;
+use tar::{Archive, EntryType::Directory};
 
 const REGISTRY: &str = "https://registry.npmjs.org";
 
@@ -95,24 +95,42 @@ impl Package {
             .expect("Tarball should be bytes");
 
         /// Emulates `tar xzf archive --strip-components=1 --directory=P`.
-        pub fn unpack<P, R>(mut archive: Archive<R>, dst: P) -> io::Result<()>
+        pub fn unpack<R>(mut archive: Archive<R>, dst: &Path) -> io::Result<()>
         where
-            P: AsRef<Path>,
             R: io::Read,
         {
-            if dst.as_ref().symlink_metadata().is_err() {
+            if dst.symlink_metadata().is_err() {
                 create_dir_all(&dst)?;
             }
 
+            let dst = &dst.canonicalize().unwrap_or(dst.to_path_buf());
+
+            // Delay any directory entries until the end (they will be created if needed by
+            // descendants), to ensure that directory permissions do not interfer with descendant
+            // extraction.
+            let mut directories = Vec::new();
             for entry in archive.entries()? {
-                let mut entry = entry?;
-                let path: PathBuf = entry
-                    .path()?
-                    .components()
-                    .skip(1) // strip top-level directory
-                    .filter(|c| matches!(c, Normal(_))) // prevent traversal attacks
-                    .collect();
-                entry.unpack(dst.as_ref().join(path))?;
+                let entry = entry?;
+                let mut entry = (
+                    dst.join(
+                        entry
+                            .path()?
+                            .components()
+                            .skip(1)
+                            .filter(|c| matches!(c, Normal(_)))
+                            .collect::<PathBuf>(),
+                    ),
+                    entry,
+                );
+                if entry.1.header().entry_type() == Directory {
+                    directories.push(entry);
+                } else {
+                    create_dir_all(entry.0.parent().unwrap())?;
+                    entry.1.unpack(entry.0)?;
+                }
+            }
+            for mut dir in directories {
+                dir.1.unpack(dir.0)?;
             }
             Ok(())
         }

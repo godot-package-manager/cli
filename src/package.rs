@@ -215,37 +215,7 @@ impl Package {
     fn indirect_download_dir(&self) -> String {
         format!("./addons/__gpm_deps/{}/{}", self.name, self.version)
     }
-}
 
-// package modification block
-/// Converts a absolute path to a relative path, with a cwd.
-/// `a/b/c`, cwd `b` => `./c`.
-fn absolute_to_relative(path: &String, cwd: &String) -> String {
-    let mut common = cwd.clone();
-    let mut result = String::from("");
-    while path.trim_start_matches(&common) == path {
-        common = Path::new(&common)
-            .parent()
-            .unwrap()
-            .as_os_str()
-            .to_string_lossy()
-            .to_string();
-        result = if result.is_empty() {
-            String::from("..")
-        } else {
-            format!("../{result}")
-        };
-    }
-    let uncommon = path.trim_start_matches(&common);
-    if !(result.is_empty() && uncommon.is_empty()) {
-        result.push_str(uncommon);
-    } else if !uncommon.is_empty() {
-        result = uncommon[1..].into();
-    }
-    result
-}
-
-impl Package {
     /// Gets the dependencies of this [Package], placing them in `self.dependencies`.
     fn get_deps(&mut self) -> &Vec<Package> {
         let cfg = self.get_config_file();
@@ -255,7 +225,10 @@ impl Package {
         });
         &self.dependencies
     }
+}
 
+// package modification block
+impl Package {
     /// Modifies the loads of a GDScript script.
     /// ```gdscript
     /// extends Node
@@ -265,23 +238,25 @@ impl Package {
     /// =>
     /// ```gdscript
     /// # --snip--
-    /// const Wow = preload("../my_awesome_addon/wow.gd")
+    /// const Wow = preload("res://addons/__gpm_deps/my_awesome_addon/wow.gd")
     /// ```
-    /// (depending on the supplied cwd)
-    fn modify_script_loads(&self, t: &String, cwd: &String) -> String {
+    fn modify_script_loads(
+        &self,
+        t: &String,
+        cwd: &PathBuf,
+        cfg: &HashMap<String, String>,
+    ) -> String {
         lazy_static::lazy_static! {
             static ref SCRIPT_LOAD_R: Regex = Regex::new("(pre)?load\\([\"']([^)]+)['\"]\\)").unwrap();
         }
         SCRIPT_LOAD_R
             .replace_all(&t, |c: &Captures| {
+                let m = Path::new(c.get(2).unwrap().as_str());
                 format!(
                     "{}load('{}')",
                     if c.get(1).is_some() { "pre" } else { "" },
-                    self.modify_load(
-                        String::from(c.get(2).unwrap().as_str().trim_start_matches("res://")),
-                        c.get(1).is_some(),
-                        cwd
-                    )
+                    self.modify_load(m.strip_prefix("res://").unwrap_or(m), cwd, cfg)
+                        .display()
                 )
             })
             .to_string()
@@ -296,11 +271,15 @@ impl Package {
     /// =>
     /// ```gdresource
     /// --snip--
-    /// [ext_resource path="../my_awesome_addon/wow.gd" type="Script" id=1]
+    /// [ext_resource path="res://addons/__gpm_deps/my_awesome_addon/wow.gd" type="Script" id=1]
     /// ```
-    /// depending on supplied cwd.
     /// godot will automatically re-absolute-ify the path, but that is fine.
-    fn modify_tres_loads(&self, t: &String, cwd: &String) -> String {
+    fn modify_tres_loads(
+        &self,
+        t: &String,
+        cwd: &PathBuf,
+        cfg: &HashMap<String, String>,
+    ) -> String {
         lazy_static::lazy_static! {
             static ref TRES_LOAD_R: Regex = Regex::new("[ext_resource path=\"([^\"]+)\"").unwrap();
         }
@@ -309,63 +288,47 @@ impl Package {
                 format!(
                     "[ext_resource path=\"{}\"",
                     self.modify_load(
-                        String::from(c.get(1).unwrap().as_str().trim_start_matches("res://")),
-                        false,
-                        cwd
+                        Path::new(c.get(1).unwrap().as_str())
+                            .strip_prefix("res://")
+                            .expect("TextResource path should be absolute"),
+                        cwd,
+                        cfg,
                     )
+                    .display()
                 )
             })
             .to_string()
     }
 
     /// The backend for modify_script_loads and modify_tres_loads.
-    fn modify_load(&self, path: String, relative_allowed: bool, cwd: &String) -> String {
-        let path_p = Path::new(&path);
-        if path_p.exists() || Path::new(cwd).join(path_p).exists() {
-            if relative_allowed {
-                let rel = absolute_to_relative(&path, cwd);
-                if path.len() > rel.len() {
-                    return rel;
-                }
-            }
-            return format!("res://{path}");
+    fn modify_load(&self, path: &Path, cwd: &PathBuf, cfg: &HashMap<String, String>) -> PathBuf {
+        let res_path = Path::new("res://");
+        if path.exists() || cwd.join(path).exists() {
+            return path.to_path_buf();
         }
-        if let Some(c) = path_p.components().nth(1) {
-            let mut cfg = HashMap::<String, String>::new();
-            for pkg in &self.dependencies {
-                cfg.insert(pkg.name.clone(), pkg.download_dir());
-                if let Some((_, s)) = pkg.name.split_once("/") {
-                    cfg.insert(String::from(s), pkg.download_dir()); // unscoped (@ben/cli => cli) (for compat)
-                }
-            }
-            cfg.insert(self.name.clone(), self.download_dir());
-            if let Some((_, s)) = self.name.split_once("/") {
-                cfg.insert(String::from(s), self.download_dir());
-            }
-            if let Some(path) = cfg.get(&String::from(c.as_os_str().to_str().unwrap())) {
-                let p = format!("res://{path}");
-                if relative_allowed {
-                    let rel = absolute_to_relative(path, cwd);
-                    if p.len() > rel.len() {
-                        return rel;
-                    }
-                }
-                return p;
+        if let Some(c) = path.components().nth(1) {
+            if let Some(addon_dir) = cfg.get(&String::from(c.as_os_str().to_str().unwrap())) {
+                let wanted_f = res_path
+                    .join(addon_dir)
+                    .join(path.components().skip(2).collect::<PathBuf>());
+                return wanted_f;
             }
         };
-        println!("Could not find path for {}", path);
-        return format!("res://{path}");
+        eprintln!("Could not find path for {path:#?}");
+        return res_path.join(path);
     }
 
     /// Recursively modifies a directory.
-    fn recursive_modify(&self, dir: String, deps: &Vec<Package>) -> io::Result<()> {
+    fn recursive_modify(
+        &self,
+        dir: PathBuf,
+        deps: &Vec<Package>,
+        cfg: &HashMap<String, String>,
+    ) -> io::Result<()> {
         for entry in read_dir(&dir)? {
             let p = entry?;
             if p.path().is_dir() {
-                self.recursive_modify(
-                    format!("{dir}/{}", p.file_name().into_string().unwrap()),
-                    deps,
-                )?;
+                self.recursive_modify(p.path(), deps, cfg)?;
                 continue;
             }
 
@@ -386,8 +349,8 @@ impl Package {
                 write(
                     p.path(),
                     match t {
-                        Type::TextResource => self.modify_tres_loads(&text, &dir),
-                        Type::GDScript => self.modify_script_loads(&text, &dir),
+                        Type::TextResource => self.modify_tres_loads(&text, &dir, cfg),
+                        Type::GDScript => self.modify_script_loads(&text, &dir, cfg),
                     },
                 )?;
             }
@@ -400,7 +363,25 @@ impl Package {
         if self.is_installed() == false {
             panic!("Attempting to modify a package that is not installed");
         }
-        if let Err(e) = self.recursive_modify(self.download_dir(), &self.dependencies) {
+        let mut cfg = HashMap::<String, String>::new();
+        fn add(p: &Package, cfg: &mut HashMap<String, String>) {
+            let d = p.download_dir().strip_prefix("./").unwrap().to_string();
+            cfg.insert(p.name.clone(), d.clone());
+            // unscoped (@ben/cli => cli) (for compat)
+            if let Some((_, s)) = p.name.split_once("/") {
+                cfg.insert(s.into(), d);
+            }
+        }
+        for pkg in &self.dependencies {
+            add(pkg, &mut cfg);
+        }
+        add(self, &mut cfg);
+        println!("{cfg:#?}");
+        if let Err(e) = self.recursive_modify(
+            Path::new(&self.download_dir()).to_path_buf(),
+            &self.dependencies,
+            &cfg,
+        ) {
             println!("Modification of {self} yielded error {e}");
         }
     }

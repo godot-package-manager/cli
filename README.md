@@ -10,7 +10,7 @@
 <details open>
 <summary>Manual</summary>
 
-1. Download the [latest release](https://github.com/godot-package-manager/cli/releases/latest/download/godot-package-manager)
+1. Download the [latest version](https://github.com/godot-package-manager/cli/releases/latest)
 2. Move the executable to your `PATH` as `gpm`
 
 </details>

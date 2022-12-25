@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   release:
     name: release
@@ -19,12 +22,20 @@ jobs:
         run: |
           echo "## setting up" > $GITHUB_STEP_SUMMARY
           rustup set auto-self-update disable
-          rustup toolchain install stable
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-pc-windows-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu
+          sudo apt-get install -y gcc-mingw-w64
+
+      - name: setup osxcross
+        uses: mbround18/setup-osxcross@main
+        with:
+          osx-version: "12.3"
 
       - name: checkout
         uses: actions/checkout@v3
 
-      - uses: Swatinem/rust-cache@v2
+      - name: cache rust
+        uses: Swatinem/rust-cache@v2
         with:
           shared-key: cache01
 
@@ -35,16 +46,21 @@ jobs:
           # [[ $(git tag | grep -c "$version") != 0 ]] && exit 0
           echo "release=$version" >> $GITHUB_OUTPUT
           echo "## building" > $GITHUB_STEP_SUMMARY
-          cargo build -r
-          ls target/release
-          echo "## releasing" > $GITHUB_STEP_SUMMARY
+          cargo build --target x86_64-pc-windows-gnu --target x86_64-unknown-linux-gnu -r
+          export CC=o64-clang; export CXX=o64-clang++; cargo build --target x86_64-apple-darwin -r
+          mv target/x86_64-apple-darwin/release/godot-package-manager target/x86_64-apple-darwin/release/godot-package-manager.apple.x86_64 # no conflicts
+          mv target/x86_64-unknown-linux-gnu/release/godot-package-manager target/x86_64-unknown-linux-gnu/release/godot-package-manager.x86_64
+          echo -e "## releasing\n$(ls target/*/release)" > $GITHUB_STEP_SUMMARY
 
       - name: release artifacts
         if: steps.build.outputs.release
-        uses: ncipollo/release-action@v1.12.0
+        uses: softprops/action-gh-release@v1
         with:
-          artifacts: "./target/release/godot-package-manager"
-          tag: ${{ steps.build.outputs.release }}
-          body: "## gpm v${{ steps.build.outputs.release }} :tada:"
-          artifactErrorsFailBuild: true
-          allowUpdates: true
+          files: |
+            target/x86_64-unknown-linux-gnu/release/godot-package-manager.x86_64
+            target/x86_64-apple-darwin/release/godot-package-manager.apple.x86_64
+            target/x86_64-pc-windows-gnu/release/godot-package-manager.exe
+          tag_name: ${{ steps.build.outputs.release }}
+          name: gpm v${{ steps.build.outputs.release }}
+          body: "## :tada:"
+          fail_on_unmatched_files: true

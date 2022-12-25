@@ -10,13 +10,14 @@
 <details open>
 <summary>Manual</summary>
 
-1. Clone this repo (`git clone --depth 1 https://github.com/godot-package-manager/client`)
-2. Compile (`cargo build -r`)
-3. Put the executable in your `PATH` (`mv target/godot-package-manager /usr/bin`)
+1. Download the [latest release](https://github.com/godot-package-manager/cli/releases/latest/download/godot-package-manager)
+2. Move the executable to your `PATH` as `gpm`
 
 </details>
 <details>
 <summary>ArchLinux</summary>
+
+> **Note** This package installs to /usr/bin/godot-package-manager to avoid conflicts with [general purpose mouse](https://www.nico.schottelius.org/software/gpm/)
 
 1. `pacman -S godot-package-manager-git`
 
@@ -32,3 +33,9 @@ gpm tree # prints the tree of installed packages, looks like
 # └── @bendn/test@2.0.10
 #    └── @bendn/gdcli@1.2.5
 ```
+
+## Compiling
+
+1. `git clone --depth 5 https://github.com/godot-package-manager/client`)
+2. `cargo build -r`
+3. Executable is `target/release/godot-package-manager`

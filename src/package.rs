@@ -435,6 +435,26 @@ mod tests {
     }
 
     #[test]
+    fn dep_map() {
+        // no fs was touched in the making of this test
+        assert_eq!(
+            Package::new("@bendn/test".into(), "2.0.10".into()).dep_map(),
+            HashMap::from([
+                ("test".into(), "addons/@bendn/test".into()),
+                ("@bendn/test".into(), "addons/@bendn/test".into()),
+                (
+                    "@bendn/gdcli".into(),
+                    "addons/__gpm_deps/@bendn/gdcli/1.2.5".into()
+                ),
+                (
+                    "gdcli".into(),
+                    "addons/__gpm_deps/@bendn/gdcli/1.2.5".into()
+                ),
+            ])
+        );
+    }
+
+    #[test]
     fn modify_load() {
         let _t = crate::test_utils::mktemp();
         let mut p = Package::new("@bendn/test".into(), "2.0.10".into());

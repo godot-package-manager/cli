@@ -104,7 +104,10 @@ fn update(cfg: &mut ConfigFile) {
         cfg.packages.len(),
         if cfg.packages.len() > 1 { "s" } else { "" }
     );
-    cfg.for_each(|p| p.download());
+    cfg.for_each(|p| {
+        p.download();
+        p.modify();
+    });
 }
 
 /// Recursively deletes empty directories.

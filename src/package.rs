@@ -376,7 +376,6 @@ impl Package {
             add(pkg, &mut cfg);
         }
         add(self, &mut cfg);
-        println!("{cfg:#?}");
         if let Err(e) = self.recursive_modify(
             Path::new(&self.download_dir()).to_path_buf(),
             &self.dependencies,

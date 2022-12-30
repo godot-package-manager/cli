@@ -391,3 +391,39 @@ impl fmt::Display for Package {
         write!(f, "{}", self.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::package::*;
+    use glob::glob;
+    use sha2::{Digest, Sha256};
+    use std::fs::read;
+
+    #[test]
+    fn download() {
+        let _t = crate::test_utils::mktemp();
+        let mut p = Package::new("@bendn/test".into(), "2.0.10".into());
+        p.download();
+        let mut files = glob(format!("{}/*", p.download_dir()).as_str())
+            .unwrap()
+            .into_iter()
+            .map(|s| {
+                let mut hasher = Sha256::new();
+                let p = &s.unwrap();
+                hasher.update(read(p).unwrap());
+                format!("{:x}", &hasher.finalize())
+            })
+            .collect::<Vec<String>>();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329",
+                "c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e",
+                "c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e",
+                "e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87",
+                "f6fe3887a6c247c8f02a048f00ea1254adb281a87622f06a03a07812318fd12e",
+            ]
+        );
+    }
+}

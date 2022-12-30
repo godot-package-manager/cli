@@ -182,3 +182,16 @@ fn tree(cfg: &ConfigFile) {
         }
     }
 }
+
+#[cfg(test)]
+mod test_utils {
+    use std::{env::set_current_dir, fs::create_dir};
+    use tempdir::TempDir;
+
+    pub fn mktemp() -> TempDir {
+        let tmp_dir = TempDir::new("gpm-tests").unwrap();
+        set_current_dir(tmp_dir.path()).unwrap();
+        create_dir("addons").unwrap();
+        tmp_dir
+    }
+}

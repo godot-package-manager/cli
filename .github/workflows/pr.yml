@@ -1,0 +1,12 @@
+name: test pr
+
+on:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: test
+        uses: godot-package-manager/cli/.github/actions/test@main

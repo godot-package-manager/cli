@@ -98,3 +98,26 @@ impl ConfigFile {
         pkgs
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config_file::*;
+
+    #[test]
+    fn parse() {
+        let cfgs: [&ConfigFile; 3] = [
+            &ConfigFile::new(&r#"dependencies: { "@bendn/test": 2.0.10 }"#.into()), // quoteless fails as a result of https://github.com/Canop/deser-hjson/issues/9
+            &ConfigFile::new(&"dependencies:\n  \"@bendn/test\": 2.0.10".into()),
+            &ConfigFile::new(&"[dependencies]\n\"@bendn/test\" = \"2.0.10\"".into()),
+        ];
+        for cfg in cfgs {
+            assert_eq!(cfg.packages.len(), 1);
+            assert_eq!(cfg.packages[0].to_string(), "@bendn/test@2.0.10");
+            assert_eq!(cfg.packages[0].dependencies.len(), 1);
+            assert_eq!(
+                cfg.packages[0].dependencies[0].to_string(),
+                "@bendn/gdcli@1.2.5"
+            )
+        }
+    }
+}

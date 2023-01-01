@@ -105,11 +105,21 @@ mod tests {
 
     #[test]
     fn parse() {
-        let cfgs: [&ConfigFile; 3] = [
-            &ConfigFile::new(&r#"dependencies: { "@bendn/test": 2.0.10 }"#.into()), // quoteless fails as a result of https://github.com/Canop/deser-hjson/issues/9
-            &ConfigFile::new(&"dependencies:\n  \"@bendn/test\": 2.0.10".into()),
-            &ConfigFile::new(&"[dependencies]\n\"@bendn/test\" = \"2.0.10\"".into()),
+        let _t = crate::test_utils::mktemp();
+        let cfgs: [&mut ConfigFile; 3] = [
+            &mut ConfigFile::new(&r#"dependencies: { "@bendn/test": 2.0.10 }"#.into()), // quoteless fails as a result of https://github.com/Canop/deser-hjson/issues/9
+            &mut ConfigFile::new(&"dependencies:\n  \"@bendn/test\": 2.0.10".into()),
+            &mut ConfigFile::new(&"[dependencies]\n\"@bendn/test\" = \"2.0.10\"".into()),
         ];
+        #[derive(Debug, Deserialize, Clone, Eq, PartialEq)]
+        struct LockFileEntry {
+            pub name: String,
+            pub version: String,
+            pub integrity: String,
+        }
+        let wanted_lockfile = serde_json::from_str::<Vec<LockFileEntry>>(
+            r#"[{"name":"@bendn/test","version":"2.0.10","integrity":"sha512-hyPGxDG8poa2ekmWr1BeTCUa7YaZYfhsN7jcLJ3q2cQVlowcTnzqmz4iV3t21QFyabE5R+rV+y6d5dAItrJeDw=="},{"name":"@bendn/gdcli","version":"1.2.5","integrity":"sha512-/YOAd1+K4JlKvPTmpX8B7VWxGtFrxKq4R0A6u5qOaaVPK6uGsl4dGZaIHpxuqcurEcwPEOabkoShXKZaOXB0lw=="}]"#,
+        ).unwrap();
         for cfg in cfgs {
             assert_eq!(cfg.packages.len(), 1);
             assert_eq!(cfg.packages[0].to_string(), "@bendn/test@2.0.10");
@@ -117,7 +127,12 @@ mod tests {
             assert_eq!(
                 cfg.packages[0].dependencies[0].to_string(),
                 "@bendn/gdcli@1.2.5"
-            )
+            );
+            cfg.for_each(|p| p.download());
+            assert_eq!(
+                serde_json::from_str::<Vec<LockFileEntry>>(cfg.lock().as_str()).unwrap(),
+                wanted_lockfile
+            );
         }
     }
 }

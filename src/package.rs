@@ -402,28 +402,14 @@ impl fmt::Display for Package {
 #[cfg(test)]
 mod tests {
     use crate::package::*;
-    use glob::glob;
-    use sha2::{Digest, Sha256};
-    use std::fs::read;
 
     #[test]
     fn download() {
         let _t = crate::test_utils::mktemp();
         let mut p = Package::new("@bendn/test".into(), "2.0.10".into());
         p.download();
-        let mut files = glob(format!("{}/*", p.download_dir()).as_str())
-            .unwrap()
-            .into_iter()
-            .map(|s| {
-                let mut hasher = Sha256::new();
-                let p = &s.unwrap();
-                hasher.update(read(p).unwrap());
-                format!("{:x}", &hasher.finalize())
-            })
-            .collect::<Vec<String>>();
-        files.sort();
         assert_eq!(
-            files,
+            crate::test_utils::hashd(p.download_dir().as_str()),
             [
                 "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329", // readme.md
                 "c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e", // sub1.gd

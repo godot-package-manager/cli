@@ -1,0 +1,15 @@
+name: Test
+description: Runs tests
+
+runs:
+  using: "composite"
+  steps:
+    - name: Test
+      run: |
+        tests=( config_file::tests::parse package::tests::dep_map package::tests::modify_load package::tests::download gpm )
+        cores=$(nproc) || cores=$(sysctl -n hw.ncpu)
+        for test in "${tests[@]}"; do
+          while [ "$(jobs -r | wc -l)" -ge $cores ]; do sleep .1; done
+          cargo test "$test" -r --color never --all-targets
+        done
+      shell: bash

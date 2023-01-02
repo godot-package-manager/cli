@@ -140,8 +140,6 @@ impl Package {
             Path::new(&self.download_dir()),
         )
         .expect("Tarball should unpack");
-
-        self.modify();
     }
 
     /// Gets the [ConfigFile] for this [Package].
@@ -244,7 +242,7 @@ impl Package {
         &self,
         t: &String,
         cwd: &PathBuf,
-        cfg: &HashMap<String, String>,
+        dep_map: &HashMap<String, String>,
     ) -> String {
         lazy_static::lazy_static! {
             static ref SCRIPT_LOAD_R: Regex = Regex::new("(pre)?load\\([\"']([^)]+)['\"]\\)").unwrap();
@@ -253,9 +251,9 @@ impl Package {
             .replace_all(&t, |c: &Captures| {
                 let m = Path::new(c.get(2).unwrap().as_str());
                 format!(
-                    "{}load('{}')",
+                    "{}load('res://{}')",
                     if c.get(1).is_some() { "pre" } else { "" },
-                    self.modify_load(m.strip_prefix("res://").unwrap_or(m), cwd, cfg)
+                    self.modify_load(m.strip_prefix("res://").unwrap_or(m), cwd, dep_map)
                         .display()
                 )
             })
@@ -278,7 +276,7 @@ impl Package {
         &self,
         t: &String,
         cwd: &PathBuf,
-        cfg: &HashMap<String, String>,
+        dep_map: &HashMap<String, String>,
     ) -> String {
         lazy_static::lazy_static! {
             static ref TRES_LOAD_R: Regex = Regex::new("[ext_resource path=\"([^\"]+)\"").unwrap();
@@ -286,13 +284,13 @@ impl Package {
         TRES_LOAD_R
             .replace_all(&t, |c: &Captures| {
                 format!(
-                    "[ext_resource path=\"{}\"",
+                    r#"[ext_resource path="res://{}""#,
                     self.modify_load(
                         Path::new(c.get(1).unwrap().as_str())
                             .strip_prefix("res://")
                             .expect("TextResource path should be absolute"),
                         cwd,
-                        cfg,
+                        dep_map,
                     )
                     .display()
                 )
@@ -301,21 +299,25 @@ impl Package {
     }
 
     /// The backend for modify_script_loads and modify_tres_loads.
-    fn modify_load(&self, path: &Path, cwd: &PathBuf, cfg: &HashMap<String, String>) -> PathBuf {
-        let res_path = Path::new("res://");
+    fn modify_load(
+        &self,
+        path: &Path,
+        cwd: &PathBuf,
+        dep_map: &HashMap<String, String>,
+    ) -> PathBuf {
+        // if it works, skip it
         if path.exists() || cwd.join(path).exists() {
             return path.to_path_buf();
         }
         if let Some(c) = path.components().nth(1) {
-            if let Some(addon_dir) = cfg.get(&String::from(c.as_os_str().to_str().unwrap())) {
-                let wanted_f = res_path
-                    .join(addon_dir)
-                    .join(path.components().skip(2).collect::<PathBuf>());
+            if let Some(addon_dir) = dep_map.get(&String::from(c.as_os_str().to_str().unwrap())) {
+                let wanted_f =
+                    Path::new(addon_dir).join(path.components().skip(2).collect::<PathBuf>());
                 return wanted_f;
             }
         };
         eprintln!("Could not find path for {path:#?}");
-        return res_path.join(path);
+        return path.to_path_buf();
     }
 
     /// Recursively modifies a directory.
@@ -323,12 +325,12 @@ impl Package {
         &self,
         dir: PathBuf,
         deps: &Vec<Package>,
-        cfg: &HashMap<String, String>,
+        dep_map: &HashMap<String, String>,
     ) -> io::Result<()> {
         for entry in read_dir(&dir)? {
             let p = entry?;
             if p.path().is_dir() {
-                self.recursive_modify(p.path(), deps, cfg)?;
+                self.recursive_modify(p.path(), deps, dep_map)?;
                 continue;
             }
 
@@ -349,8 +351,8 @@ impl Package {
                 write(
                     p.path(),
                     match t {
-                        Type::TextResource => self.modify_tres_loads(&text, &dir, cfg),
-                        Type::GDScript => self.modify_script_loads(&text, &dir, cfg),
+                        Type::TextResource => self.modify_tres_loads(&text, &dir, dep_map),
+                        Type::GDScript => self.modify_script_loads(&text, &dir, dep_map),
                     },
                 )?;
             }
@@ -358,28 +360,33 @@ impl Package {
         Ok(())
     }
 
+    fn dep_map(&self) -> HashMap<String, String> {
+        let mut dep_map = HashMap::<String, String>::new();
+        fn add(p: &Package, dep_map: &mut HashMap<String, String>) {
+            let d = p.download_dir().strip_prefix("./").unwrap().to_string();
+            dep_map.insert(p.name.clone(), d.clone());
+            // unscoped (@ben/cli => cli) (for compat)
+            if let Some((_, s)) = p.name.split_once("/") {
+                dep_map.insert(s.into(), d);
+            }
+        }
+        for pkg in &self.dependencies {
+            add(pkg, &mut dep_map);
+        }
+        add(self, &mut dep_map);
+        dep_map
+    }
+
     /// The catalyst for `recursive_modify`.
     pub fn modify(&self) {
         if self.is_installed() == false {
             panic!("Attempting to modify a package that is not installed");
         }
-        let mut cfg = HashMap::<String, String>::new();
-        fn add(p: &Package, cfg: &mut HashMap<String, String>) {
-            let d = p.download_dir().strip_prefix("./").unwrap().to_string();
-            cfg.insert(p.name.clone(), d.clone());
-            // unscoped (@ben/cli => cli) (for compat)
-            if let Some((_, s)) = p.name.split_once("/") {
-                cfg.insert(s.into(), d);
-            }
-        }
-        for pkg in &self.dependencies {
-            add(pkg, &mut cfg);
-        }
-        add(self, &mut cfg);
+
         if let Err(e) = self.recursive_modify(
             Path::new(&self.download_dir()).to_path_buf(),
             &self.dependencies,
-            &cfg,
+            &self.dep_map(),
         ) {
             println!("Modification of {self} yielded error {e}");
         }
@@ -389,5 +396,71 @@ impl Package {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::package::*;
+
+    #[test]
+    fn download() {
+        let _t = crate::test_utils::mktemp();
+        let mut p = Package::new("@bendn/test".into(), "2.0.10".into());
+        p.download();
+        assert_eq!(
+            crate::test_utils::hashd(p.download_dir().as_str()),
+            [
+                "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329", // readme.md
+                "c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e", // sub1.gd
+                "c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e", // sub2.gd
+                "d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5", // main.gd
+                "e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87", // package.json
+            ]
+        );
+    }
+
+    #[test]
+    fn dep_map() {
+        // no fs was touched in the making of this test
+        assert_eq!(
+            Package::new("@bendn/test".into(), "2.0.10".into()).dep_map(),
+            HashMap::from([
+                ("test".into(), "addons/@bendn/test".into()),
+                ("@bendn/test".into(), "addons/@bendn/test".into()),
+                (
+                    "@bendn/gdcli".into(),
+                    "addons/__gpm_deps/@bendn/gdcli/1.2.5".into()
+                ),
+                (
+                    "gdcli".into(),
+                    "addons/__gpm_deps/@bendn/gdcli/1.2.5".into()
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn modify_load() {
+        let _t = crate::test_utils::mktemp();
+        let mut p = Package::new("@bendn/test".into(), "2.0.10".into());
+        let dep_map = &p.dep_map();
+        let cwd = &Path::new("addons/@bendn/test").into(); // holy shit rust is smart -- it knows this needs to be a pathbuf
+        p.download();
+        p.indirect = false;
+        assert_eq!(
+            p.modify_load(Path::new("addons/test/main.gd"), cwd, dep_map)
+                .to_str()
+                .unwrap(),
+            "addons/@bendn/test/main.gd"
+        );
+
+        // dependency usage test
+        assert_eq!(
+            p.modify_load(Path::new("addons/gdcli/Parser.gd"), cwd, dep_map)
+                .to_str()
+                .unwrap(),
+            "addons/__gpm_deps/@bendn/gdcli/1.2.5/Parser.gd"
+        )
     }
 }

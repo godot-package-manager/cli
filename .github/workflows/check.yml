@@ -1,0 +1,18 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: setup
+        uses: godot-package-manager/cli/.github/actions/setup@main
+
+      - name: test
+        uses: godot-package-manager/cli/.github/actions/test@main

@@ -19,31 +19,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: setup
-        run: |
-          echo "## setting up" > $GITHUB_STEP_SUMMARY
-          rustup set auto-self-update disable
-          rustup toolchain install stable --profile minimal
-          rustup target add x86_64-pc-windows-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu
-          sudo apt-get install -y gcc-mingw-w64
+        uses: godot-package-manager/cli/.github/actions/setup@main
 
-      - name: setup osxcross
-        uses: mbround18/setup-osxcross@main
-        with:
-          osx-version: "12.3"
-
-      - name: checkout
-        uses: actions/checkout@v3
-
-      - name: cache rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: cache01
+      - name: test
+        uses: godot-package-manager/cli/.github/actions/test@main
 
       - name: build
         id: build
         run: |
           version="$(grep "version = " Cargo.toml | head -n 1 | awk -F '"' '{ print $2 }')"
-          # [[ $(git tag | grep -c "$version") != 0 ]] && exit 0
+          [[ $(git tag | grep -c "$version") != 0 ]] && exit 0
           echo "release=$version" >> $GITHUB_OUTPUT
           echo "## building" > $GITHUB_STEP_SUMMARY
           cargo build --target x86_64-pc-windows-gnu --target x86_64-unknown-linux-gnu -r

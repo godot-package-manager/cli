@@ -49,3 +49,4 @@ jobs:
           name: gpm v${{ steps.build.outputs.release }}
           body: "## :tada:"
           fail_on_unmatched_files: true
+          generate_release_notes: true

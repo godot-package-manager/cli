@@ -2,7 +2,7 @@ mod config_file;
 mod package;
 
 use crate::package::Package;
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
 use config_file::ConfigFile;
 use std::env::current_dir;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
@@ -35,7 +35,7 @@ struct Args {
     lock_file: PathBuf,
 }
 
-#[derive(clap::Subcommand)]
+#[derive(Subcommand)]
 enum Actions {
     #[clap(short_flag = 'u')]
     /// Downloads the latest versions of your wanted packages.
@@ -50,7 +50,17 @@ Produces output like
 /home/my-package
 └── @bendn/test@2.0.10
     └── @bendn/gdcli@1.2.5")]
-    Tree,
+    Tree {
+        #[arg(value_enum, default_value = "utf8", long = "charset")]
+        /// Character set to print in.
+        charset: CharSet,
+    },
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum CharSet {
+    UTF8,
+    ASCII,
 }
 
 fn main() {
@@ -82,7 +92,7 @@ fn main() {
     match args.action {
         Actions::Update => update(&mut cfg_file, true),
         Actions::Purge => purge(&mut cfg_file),
-        Actions::Tree => print!("{}", tree(&cfg_file)),
+        Actions::Tree { charset } => print!("{}", tree(&cfg_file, charset)),
     }
     let lockfile = cfg_file.lock();
     if args.lock_file == Path::new("-") {
@@ -163,32 +173,40 @@ fn purge(cfg: &mut ConfigFile) {
     }
 }
 
-fn tree(cfg: &ConfigFile) -> String {
+fn tree(cfg: &ConfigFile, charset: CharSet) -> String {
     let mut tree: String = if let Ok(s) = current_dir() {
         format!("{}\n", s.to_string_lossy())
     } else {
         ".\n".to_string()
     };
-    iter(&cfg.packages, "", &mut tree);
-    fn iter(packages: &Vec<Package>, prefix: &str, tree: &mut String) {
+    iter(
+        &cfg.packages,
+        "",
+        &mut tree,
+        match charset {
+            CharSet::UTF8 => "├──", // believe it or not, these are different
+            CharSet::ASCII => "|--",
+        },
+        match charset {
+            CharSet::UTF8 => "└──",
+            CharSet::ASCII => "`--",
+        },
+    );
+    fn iter(packages: &Vec<Package>, prefix: &str, tree: &mut String, t: &str, l: &str) {
         // the index is used to decide if the package is the last package,
-        // so we can use a corner instead of a T.
+        // so we can use a L instead of a T.
         let mut index = packages.len();
         for p in packages {
             let name = p.to_string();
             index -= 1;
-            tree.push_str(
-                format!(
-                    "{prefix}{} {name}\n",
-                    if index != 0 { "├──" } else { "└──" }
-                )
-                .as_str(),
-            );
+            tree.push_str(format!("{prefix}{} {name}\n", if index != 0 { t } else { l }).as_str());
             if p.has_deps() {
                 iter(
                     &p.dependencies,
                     &format!("{prefix}{}   ", if index != 0 { '│' } else { ' ' }),
                     tree,
+                    t,
+                    l,
                 );
             }
         }
@@ -237,7 +255,7 @@ fn gpm() {
     purge(cfg_file);
     assert_eq!(test_utils::hashd("addons"), vec![] as Vec<String>);
     assert_eq!(
-        tree(cfg_file)
+        tree(cfg_file, crate::CharSet::UTF8)
             .lines()
             .skip(1)
             .collect::<Vec<&str>>()

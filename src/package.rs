@@ -1,7 +1,8 @@
 use crate::config_file::ConfigFile;
 use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::Value as JValue;
 use std::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, write};
 use std::io;
 use std::path::{Component::Normal, Path, PathBuf};
@@ -19,21 +20,13 @@ const REGISTRY: &str = "https://registry.npmjs.org";
 pub struct Package {
     pub name: String,
     pub version: String,
-    #[serde(flatten)]
-    pub npm_manifest: NpmManifest,
     #[serde(skip)]
     pub dependencies: Vec<Package>,
     #[serde(skip)]
     pub indirect: bool,
-}
-
-#[derive(Debug, Deserialize, Clone, Eq, Ord, PartialEq, PartialOrd, Default, Serialize)]
-/// Struct for representing a package manifest, produced from `https://registry.npmjs.org/name/ver`.
-/// Many property's are discarded, only tarballs and integrity hashes are kept
-pub struct NpmManifest {
-    #[serde(skip_serializing)]
-    pub tarball: String,
-    pub integrity: String,
+    pub integrity: String, // cant be bothered to use Options
+    #[serde(skip)]
+    manifest: String,
 }
 
 impl Package {
@@ -61,7 +54,8 @@ impl Package {
 
     /// Returns wether this package is installed.
     pub fn is_installed(&self) -> bool {
-        Path::new(&self.download_dir()).exists()
+        Path::new(&self.direct_download_dir()).exists()
+            || Path::new(&self.indirect_download_dir()).exists()
     }
 
     /// Deletes this [Package].
@@ -76,10 +70,7 @@ impl Package {
     pub fn download(&mut self) {
         println!("Downloading {self}");
         self.purge();
-        if self.npm_manifest.tarball.is_empty() {
-            self.get_manifest()
-        };
-        let resp = ureq::get(&self.npm_manifest.tarball)
+        let resp = ureq::get(&self.get_tarball().expect("Should be able to get tarball"))
             .call()
             .expect("Tarball download should work");
 
@@ -171,12 +162,8 @@ impl Package {
         .expect("The package config file should be correct/valid JSON")
     }
 
-    /// Gets the [NpmManifest], and puts it in `self.npm_manifest`.
-    pub fn get_manifest(&mut self) {
-        #[derive(Debug, Deserialize)]
-        struct W {
-            pub dist: NpmManifest,
-        }
+    /// Gets the package manifest and puts it in `self.manfiest`.
+    fn get_manifest(&mut self) {
         let resp = ureq::get(&format!("{}/{}/{}", REGISTRY, self.name, self.version))
             .call()
             .expect("Getting the package manifest file should not fail")
@@ -190,9 +177,27 @@ impl Package {
                 self.name, self.version
             )
         }
-        self.npm_manifest = serde_json::from_str::<W>(&resp)
-            .expect("The package manifest file should be correct/valid JSON")
-            .dist;
+        let _ = serde_json::from_str::<JValue>(&resp).expect("Manifest should be valid JSON");
+        self.manifest = resp
+    }
+
+    /// Gets the package tarball.
+    pub fn get_tarball(&mut self) -> Option<String> {
+        if self.manifest.is_empty() {
+            self.get_manifest();
+        }
+        let j = serde_json::from_str::<JValue>(&self.manifest).unwrap();
+        Some(j.get("dist")?.get("tarball")?.as_str()?.to_string())
+    }
+
+    /// Gets the package integrity.
+    pub fn get_integrity(&mut self) -> Option<String> {
+        if self.manifest.is_empty() {
+            self.get_manifest();
+        }
+        let j = serde_json::from_str::<JValue>(&self.manifest).unwrap();
+        Some(j.get("dist")?.get("integrity")?.as_str()?.to_string())
+        // TODO: try and get the integrity manually if already installed
     }
 
     /// Returns the download directory for this package depending on wether it is indirect or not.

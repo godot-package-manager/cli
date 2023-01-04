@@ -1,5 +1,5 @@
 use crate::package::Package;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Result;
 use std::collections::HashMap;
 
@@ -9,12 +9,6 @@ use std::collections::HashMap;
 pub struct ConfigFile {
     pub packages: Vec<Package>,
     // hooks: there are no hooks now
-}
-#[derive(Debug, Serialize)]
-/// A package lock object. Goes into the godot.lock file.
-struct PackageLock {
-    version: String,
-    integrity: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -62,14 +56,19 @@ impl ConfigFile {
     /// Creates a lockfile for this config file.
     /// note: Lockfiles are currently unused.
     pub fn lock(&mut self) -> String {
-        serde_json::to_string_pretty(
-            &self
-                .collect()
-                .into_iter()
-                .filter(|p| p.is_installed())
-                .collect::<Vec<Package>>(),
-        )
-        .unwrap()
+        let mut pkgs = vec![] as Vec<Package>;
+        self.collect()
+            .into_iter()
+            .filter(|p| p.is_installed())
+            .for_each(|mut p| {
+                if p.integrity.is_empty() {
+                    p.integrity = p
+                        .get_integrity()
+                        .expect("Should be able to get package integrity");
+                }
+                pkgs.push(p);
+            });
+        serde_json::to_string_pretty(&pkgs).unwrap()
     }
 
     /// Iterates over all the packages (and their deps) in this config file.

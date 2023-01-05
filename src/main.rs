@@ -54,13 +54,30 @@ Produces output like
         #[arg(value_enum, default_value = "utf8", long = "charset")]
         /// Character set to print in.
         charset: CharSet,
+
+        #[arg(value_enum, default_value = "indent", long = "prefix")]
+        /// The prefix (indentation) of how the tree entrys are displayed
+        prefix: PrefixType,
+
+        #[arg(long = "tarballs", default_value = "false")]
+        /// To print download urls next to the package name
+        print_tarballs: bool,
     },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+/// Charset for the tree subcommand
 enum CharSet {
     UTF8,
     ASCII,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+/// Prefix type for the tree subcommand
+enum PrefixType {
+    Indent,
+    Depth,
+    None,
 }
 
 fn main() {
@@ -92,7 +109,11 @@ fn main() {
     match args.action {
         Actions::Update => update(&mut cfg_file, true),
         Actions::Purge => purge(&mut cfg_file),
-        Actions::Tree { charset } => print!("{}", tree(&cfg_file, charset)),
+        Actions::Tree {
+            charset,
+            prefix,
+            print_tarballs,
+        } => print!("{}", tree(&mut cfg_file, charset, prefix, print_tarballs)),
     }
     let lockfile = cfg_file.lock();
     if args.lock_file == Path::new("-") {
@@ -173,40 +194,87 @@ fn purge(cfg: &mut ConfigFile) {
     }
 }
 
-fn tree(cfg: &ConfigFile, charset: CharSet) -> String {
+fn tree(
+    cfg: &mut ConfigFile,
+    charset: CharSet,
+    prefix: PrefixType,
+    print_tarballs: bool,
+) -> String {
     let mut tree: String = if let Ok(s) = current_dir() {
         format!("{}\n", s.to_string_lossy())
     } else {
         ".\n".to_string()
     };
     iter(
-        &cfg.packages,
+        &mut cfg.packages,
         "",
         &mut tree,
         match charset {
-            CharSet::UTF8 => "├──", // believe it or not, these are different
-            CharSet::ASCII => "|--",
+            CharSet::UTF8 => "├──", // believe it or not, these are unlike
+            CharSet::ASCII => "|--",      // its hard to tell, with ligatures enabled
+                                           // and rustfmt wants to indent like
+                                           // it must not be very stabled
         },
         match charset {
             CharSet::UTF8 => "└──",
             CharSet::ASCII => "`--",
         },
+        prefix,
+        print_tarballs,
+        0,
     );
-    fn iter(packages: &Vec<Package>, prefix: &str, tree: &mut String, t: &str, l: &str) {
+
+    fn iter(
+        packages: &mut Vec<Package>,
+        prefix: &str,
+        tree: &mut String,
+        t: &str,
+        l: &str,
+        prefix_type: PrefixType,
+        print_tarballs: bool,
+        depth: u32,
+    ) {
         // the index is used to decide if the package is the last package,
         // so we can use a L instead of a T.
+        let mut tmp: String;
         let mut index = packages.len();
         for p in packages {
             let name = p.to_string();
             index -= 1;
-            tree.push_str(format!("{prefix}{} {name}\n", if index != 0 { t } else { l }).as_str());
+            tree.push_str(
+                match prefix_type {
+                    PrefixType::Indent => {
+                        format!("{prefix}{} {name}", if index != 0 { t } else { l })
+                    }
+                    PrefixType::Depth => format!("{depth} {name}"),
+                    PrefixType::None => format!("{name}"),
+                }
+                .as_str(),
+            );
+            if print_tarballs {
+                tree.push(' ');
+                tree.push_str(
+                    p.get_tarball()
+                        .expect("Should be able to get tarball")
+                        .as_str(),
+                );
+            }
+            tree.push('\n');
             if p.has_deps() {
                 iter(
-                    &p.dependencies,
-                    &format!("{prefix}{}   ", if index != 0 { '│' } else { ' ' }),
+                    &mut p.dependencies,
+                    if prefix_type == PrefixType::Indent {
+                        tmp = format!("{prefix}{}   ", if index != 0 { '│' } else { ' ' });
+                        tmp.as_str()
+                    } else {
+                        ""
+                    },
                     tree,
                     t,
                     l,
+                    prefix_type,
+                    print_tarballs,
+                    depth + 1,
                 );
             }
         }
@@ -255,11 +323,16 @@ fn gpm() {
     purge(cfg_file);
     assert_eq!(test_utils::hashd("addons"), vec![] as Vec<String>);
     assert_eq!(
-        tree(cfg_file, crate::CharSet::UTF8)
-            .lines()
-            .skip(1)
-            .collect::<Vec<&str>>()
-            .join("\n"),
+        tree(
+            cfg_file,
+            crate::CharSet::UTF8,
+            crate::PrefixType::Indent,
+            false
+        )
+        .lines()
+        .skip(1)
+        .collect::<Vec<&str>>()
+        .join("\n"),
         "└── @bendn/test@2.0.10\n    └── @bendn/gdcli@1.2.5"
     );
 }

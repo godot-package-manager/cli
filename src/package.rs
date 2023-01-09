@@ -3,6 +3,7 @@ use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
 use serde::Serialize;
 use serde_json::Value as JValue;
+use sha1::{Digest, Sha1};
 use std::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, write};
 use std::io;
 use std::path::{Component::Normal, Path, PathBuf};
@@ -84,6 +85,22 @@ impl Package {
         resp.into_reader()
             .read_to_end(&mut bytes)
             .expect("Tarball should be bytes");
+
+        let mut hasher = Sha1::new();
+        hasher.update(&bytes);
+        const ERR: &str = "Tarball shasum should be a valid hex string";
+        assert_eq!(
+            serde_json::from_str::<JValue>(&self.manifest)
+                .unwrap() // these 2 fields cant fail, as they were parsed in get_tarball()
+                .get("dist")
+                .unwrap()
+                .get("shasum")
+                .expect(ERR)
+                .as_str()
+                .expect(ERR),
+            format!("{:x}", hasher.finalize()),
+            "Tarball did not match checksum!"
+        );
 
         /// Emulates `tar xzf archive --strip-components=1 --directory=P`.
         pub fn unpack<R>(mut archive: Archive<R>, dst: &Path) -> io::Result<()>

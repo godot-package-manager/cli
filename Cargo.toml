@@ -1,6 +1,6 @@
 [package]
 name = "godot-package-manager"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 authors = ["bendn <bend.n@outlook.com>"]
 description = "A package manager for godot"
@@ -21,6 +21,7 @@ serde_json = "1.0.89"
 serde_yaml = "0.9.14"
 tar = "0.4.38"
 toml = "0.5.10"
+sha1 = "0.10.5"
 
 [dev-dependencies]
 glob = "0.3.0"

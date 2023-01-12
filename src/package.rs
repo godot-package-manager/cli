@@ -69,7 +69,6 @@ impl Package {
     /// Installs this [Package] to a download directory,
     /// depending on wether this package is a direct dependency or not.
     pub fn download(&mut self) {
-        println!("Downloading {self}");
         self.purge();
         let resp = ureq::get(&self.get_tarball().expect("Should be able to get tarball"))
             .call()
@@ -338,7 +337,10 @@ impl Package {
                 return wanted_f;
             }
         };
-        eprintln!("Could not find path for {path:#?}");
+        eprintln!(
+            "{}: Could not find path for {path:#?}",
+            crate::print_consts::warn()
+        );
         return path.to_path_buf();
     }
 
@@ -400,18 +402,16 @@ impl Package {
     }
 
     /// The catalyst for `recursive_modify`.
-    pub fn modify(&self) {
+    pub fn modify(&self) -> io::Result<()> {
         if self.is_installed() == false {
             panic!("Attempting to modify a package that is not installed");
         }
 
-        if let Err(e) = self.recursive_modify(
+        self.recursive_modify(
             Path::new(&self.download_dir()).to_path_buf(),
             &self.dependencies,
             &self.dep_map(),
-        ) {
-            println!("Modification of {self} yielded error {e}");
-        }
+        )
     }
 }
 

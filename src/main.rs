@@ -2,13 +2,16 @@ mod config_file;
 mod package;
 
 use crate::package::Package;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
 use config_file::ConfigFile;
+use console::{self, Term};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::env::current_dir;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read, Result};
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "gpm")]
@@ -25,6 +28,7 @@ struct Args {
     )]
     /// Specify the location of the package configuration file (https://github.com/godot-package-manager#godotpackage). If -, read from stdin.
     config_file: PathBuf,
+
     #[arg(
         short = 'l',
         long = "lock-file",
@@ -33,13 +37,21 @@ struct Args {
     )]
     /// Specify the location of the lock file. If -, print to stdout.
     lock_file: PathBuf,
+
+    #[arg(long = "colors", default_value = "auto", global = true)]
+    /// Control color output.
+    colors: ColorChoice,
 }
 
 #[derive(Subcommand)]
 enum Actions {
     #[clap(short_flag = 'u')]
     /// Downloads the latest versions of your wanted packages.
-    Update,
+    Update {
+        #[arg(short = 's')]
+        /// To print the progress bar
+        silent: bool,
+    },
     #[clap(short_flag = 'p')]
     /// Deletes all installed packages.
     Purge,
@@ -56,44 +68,56 @@ Produces output like
         charset: CharSet,
 
         #[arg(value_enum, default_value = "indent", long = "prefix")]
-        /// The prefix (indentation) of how the tree entrys are displayed
+        /// The prefix (indentation) of how the tree entrys are displayed.
         prefix: PrefixType,
 
         #[arg(long = "tarballs", default_value = "false")]
-        /// To print download urls next to the package name
+        /// To print download urls next to the package name.
         print_tarballs: bool,
     },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-/// Charset for the tree subcommand
+/// Charset for the tree subcommand.
 enum CharSet {
+    /// Unicode characters (├── └──).
     UTF8,
+    /// ASCII characters (|-- `--).
     ASCII,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-/// Prefix type for the tree subcommand
+/// Prefix type for the tree subcommand.
 enum PrefixType {
+    /// Indents the tree entries proportional to the depth.
     Indent,
+    /// Print the depth before the entries.
     Depth,
+    /// No indentation, just list.
     None,
 }
 
 fn main() {
-    #[rustfmt::skip]
     panic::set_hook(Box::new(|panic_info| {
-        const RED: &str = "\x1b[1;31m";
-        const RESET: &str = "\x1b[0m";
         match panic_info.location() {
-            Some(s) => print!("{RED}err{RESET}@{}:{}:{}: ", s.file(), s.line(), s.column()),
-            None => print!("{RED}err{RESET}: "),
+            Some(s) => eprint!("{}@{}:{}: ", print_consts::err(), s.file(), s.line()),
+            None => eprint!("{}: ", print_consts::err()),
         }
-        if let Some(s) = panic_info.payload().downcast_ref::<&str>() { println!("{s}"); }
-        else if let Some(s) = panic_info.payload().downcast_ref::<String>() { println!("{s}"); }
-        else { println!("unknown"); };
+        #[rustfmt::skip]
+        if let Some(s) = panic_info.payload().downcast_ref::<&str>() { eprintln!("{s}"); }
+        else if let Some(s) = panic_info.payload().downcast_ref::<String>() { eprintln!("{s}"); }
+        else { eprintln!("unknown"); };
     }));
     let args = Args::parse();
+    fn set_colors(val: bool) {
+        console::set_colors_enabled(val);
+        console::set_colors_enabled_stderr(val)
+    }
+    match args.colors {
+        ColorChoice::Always => set_colors(true),
+        ColorChoice::Never => set_colors(false),
+        ColorChoice::Auto => set_colors(Term::stdout().is_term() && Term::stderr().is_term()),
+    }
     let mut contents = String::from("");
     if args.config_file == Path::new("-") {
         let bytes = stdin()
@@ -107,7 +131,7 @@ fn main() {
     };
     let mut cfg_file = ConfigFile::new(&contents);
     match args.action {
-        Actions::Update => update(&mut cfg_file, true),
+        Actions::Update { silent } => update(&mut cfg_file, true, silent),
         Actions::Purge => purge(&mut cfg_file),
         Actions::Tree {
             charset,
@@ -123,23 +147,47 @@ fn main() {
     }
 }
 
-fn update(cfg: &mut ConfigFile, modify: bool) {
+fn update(cfg: &mut ConfigFile, modify: bool, silent: bool) {
     if !Path::new("./addons/").exists() {
         create_dir("./addons/").expect("Should be able to create addons folder");
     }
-    if cfg.packages.is_empty() {
+    let packages = cfg.collect();
+    if packages.is_empty() {
         panic!("No packages to update (modify the \"godot.package\" file to add packages)");
     }
     println!(
-        "Update {} package{}",
-        cfg.packages.len(),
-        if cfg.packages.len() > 1 { "s" } else { "" }
+        "Updating {} package{}",
+        packages.len(),
+        if packages.len() > 1 { "s" } else { "" }
     );
-    cfg.for_each(|p| {
+    let bar = if silent {
+        ProgressBar::hidden()
+    } else {
+        let bar = ProgressBar::new(packages.len() as u64 * 3);
+        bar.set_style(
+            ProgressStyle::with_template(
+                "[{elapsed}] {bar:20.green/red} {human_pos:>3}/{human_len:3} {msg}",
+            )
+            .unwrap()
+            .progress_chars("-|-"),
+        );
+        bar.enable_steady_tick(Duration::new(0, 500));
+        bar
+    };
+    packages.into_iter().for_each(|mut p| {
+        bar.set_message(format!("downloading {p}"));
         p.download();
+        bar.inc(1);
+        bar.set_message(format!("modifying {p}"));
         if modify {
-            p.modify()
+            if let Err(e) = p.modify() {
+                eprintln!(
+                    "{}: modification of {p} failed with err {e}",
+                    print_consts::warn()
+                )
+            }
         }
+        bar.inc(1);
     });
 }
 
@@ -180,7 +228,7 @@ fn purge(cfg: &mut ConfigFile) {
         };
     };
     println!(
-        "Purge {} package{}",
+        "Purging {} package{}",
         packages.len(),
         if packages.len() > 1 { "s" } else { "" }
     );
@@ -318,7 +366,7 @@ mod test_utils {
 fn gpm() {
     let _t = test_utils::mktemp();
     let cfg_file = &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into());
-    update(cfg_file, false);
+    update(cfg_file, false, false);
     assert_eq!(test_utils::hashd("addons").join("|"), "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329|8e77e3adf577d32c8bc98981f05d40b2eb303271da08bfa7e205d3f27e188bd7|a625595a71b159e33b3d1ee6c13bea9fc4372be426dd067186fe2e614ce76e3c|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c850a9300388d6da1566c12a389927c3353bf931c4d6ea59b02beb302aac03ea|d060936e5f1e8b1f705066ade6d8c6de90435a91c51f122905a322251a181a5c|d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5|d794f3cee783779f50f37a53e1d46d9ebbc5ee7b37c36d7b6ee717773b6955cd|e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87");
     purge(cfg_file);
     assert_eq!(test_utils::hashd("addons"), vec![] as Vec<String>);
@@ -335,4 +383,18 @@ fn gpm() {
         .join("\n"),
         "└── @bendn/test@2.0.10\n    └── @bendn/gdcli@1.2.5"
     );
+}
+
+pub mod print_consts {
+    use console::{style, StyledObject};
+
+    #[inline]
+    pub fn err() -> StyledObject<&'static str> {
+        style("err").red().bold()
+    }
+
+    #[inline]
+    pub fn warn() -> StyledObject<&'static str> {
+        style("err").yellow().bold()
+    }
 }

@@ -217,7 +217,7 @@ impl Package {
     }
 
     /// Returns the download directory for this package depending on wether it is indirect or not.
-    fn download_dir(&self) -> String {
+    pub fn download_dir(&self) -> String {
         if self.indirect {
             self.indirect_download_dir()
         } else {
@@ -338,7 +338,7 @@ impl Package {
             }
         };
         eprintln!(
-            "{}: Could not find path for {path:#?}",
+            "{:>12} Could not find path for {path:#?}",
             crate::print_consts::warn()
         );
         return path.to_path_buf();

@@ -5,13 +5,13 @@ use crate::package::Package;
 use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
 use config_file::ConfigFile;
 use console::{self, Term};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressIterator};
 use std::env::current_dir;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read, Result};
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "gpm")]
@@ -41,17 +41,17 @@ struct Args {
     #[arg(long = "colors", default_value = "auto", global = true)]
     /// Control color output.
     colors: ColorChoice,
+
+    #[arg(long = "nv", global = true)]
+    /// Disable progress bars
+    not_verbose: bool,
 }
 
 #[derive(Subcommand)]
 enum Actions {
     #[clap(short_flag = 'u')]
     /// Downloads the latest versions of your wanted packages.
-    Update {
-        #[arg(short = 's')]
-        /// To print the progress bar
-        silent: bool,
-    },
+    Update,
     #[clap(short_flag = 'p')]
     /// Deletes all installed packages.
     Purge,
@@ -99,14 +99,18 @@ enum PrefixType {
 
 fn main() {
     panic::set_hook(Box::new(|panic_info| {
-        match panic_info.location() {
-            Some(s) => eprint!("{}@{}:{}: ", print_consts::err(), s.file(), s.line()),
-            None => eprint!("{}: ", print_consts::err()),
+        eprint!("{:>12} ", print_consts::err());
+        if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            eprint!("{s}");
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            eprint!("{s}");
+        } else {
+            eprint!("unknown");
+        };
+        if let Some(s) = panic_info.location() {
+            eprint!(" (@{}:{})", s.file(), s.line())
         }
-        #[rustfmt::skip]
-        if let Some(s) = panic_info.payload().downcast_ref::<&str>() { eprintln!("{s}"); }
-        else if let Some(s) = panic_info.payload().downcast_ref::<String>() { eprintln!("{s}"); }
-        else { eprintln!("unknown"); };
+        eprintln!("");
     }));
     let args = Args::parse();
     fn set_colors(val: bool) {
@@ -131,8 +135,8 @@ fn main() {
     };
     let mut cfg_file = ConfigFile::new(&contents);
     match args.action {
-        Actions::Update { silent } => update(&mut cfg_file, true, silent),
-        Actions::Purge => purge(&mut cfg_file),
+        Actions::Update => update(&mut cfg_file, true, args.not_verbose),
+        Actions::Purge => purge(&mut cfg_file, args.not_verbose),
         Actions::Tree {
             charset,
             prefix,
@@ -147,7 +151,7 @@ fn main() {
     }
 }
 
-fn update(cfg: &mut ConfigFile, modify: bool, silent: bool) {
+fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
     if !Path::new("./addons/").exists() {
         create_dir("./addons/").expect("Should be able to create addons folder");
     }
@@ -155,40 +159,40 @@ fn update(cfg: &mut ConfigFile, modify: bool, silent: bool) {
     if packages.is_empty() {
         panic!("No packages to update (modify the \"godot.package\" file to add packages)");
     }
-    println!(
-        "Updating {} package{}",
-        packages.len(),
-        if packages.len() > 1 { "s" } else { "" }
-    );
-    let bar = if silent {
-        ProgressBar::hidden()
+    let bar;
+    let p_count = packages.len() as u64;
+    if not_verbose {
+        bar = ProgressBar::hidden();
     } else {
-        let bar = ProgressBar::new(packages.len() as u64 * 3);
-        bar.set_style(
-            ProgressStyle::with_template(
-                "[{elapsed}] {bar:20.green/red} {human_pos:>3}/{human_len:3} {msg}",
-            )
-            .unwrap()
-            .progress_chars("-|-"),
-        );
-        bar.enable_steady_tick(Duration::new(0, 500));
-        bar
+        bar = print_consts::bar(p_count);
+        bar.set_prefix("Updating");
     };
-    packages.into_iter().for_each(|mut p| {
-        bar.set_message(format!("downloading {p}"));
-        p.download();
-        bar.inc(1);
-        bar.set_message(format!("modifying {p}"));
-        if modify {
-            if let Err(e) = p.modify() {
-                eprintln!(
-                    "{}: modification of {p} failed with err {e}",
-                    print_consts::warn()
-                )
+    let now = Instant::now();
+    packages
+        .into_iter()
+        .progress_with(bar.clone())
+        .for_each(|mut p| {
+            bar.set_message(format!("{p}"));
+            p.download();
+            if modify {
+                if let Err(e) = p.modify() {
+                    bar.suspend(|| {
+                        eprintln!(
+                            "{:>12} modification of {p} failed with err {e}",
+                            print_consts::warn()
+                        )
+                    });
+                }
             }
-        }
-        bar.inc(1);
-    });
+            bar.suspend(|| println!("{:>12} {p}", print_consts::green("Downloaded")));
+        });
+    println!(
+        "{:>12} updated {} package{} in {}",
+        print_consts::green("Finished"),
+        HumanCount(p_count),
+        if p_count > 0 { "s" } else { "" },
+        HumanDuration(now.elapsed())
+    )
 }
 
 /// Recursively deletes empty directories.
@@ -214,7 +218,7 @@ fn recursive_delete_empty(dir: String) -> Result<()> {
     Ok(())
 }
 
-fn purge(cfg: &mut ConfigFile) {
+fn purge(cfg: &mut ConfigFile, not_verbose: bool) {
     let packages = cfg
         .collect()
         .into_iter()
@@ -222,17 +226,32 @@ fn purge(cfg: &mut ConfigFile) {
         .collect::<Vec<Package>>();
     if packages.is_empty() {
         if cfg.packages.is_empty() {
-            panic!("No packages to update (modify the \"godot.package\" file to add packages)")
+            panic!("No packages configured (modify the \"godot.package\" file to add packages)")
         } else {
-            panic!("No packages installed(use \"gpm --update\" to install packages)")
+            panic!("No packages installed (use \"gpm --update\" to install packages)")
         };
     };
-    println!(
-        "Purging {} package{}",
-        packages.len(),
-        if packages.len() > 1 { "s" } else { "" }
-    );
-    packages.into_iter().for_each(|p| p.purge());
+    let p_count = packages.len() as u64;
+    let bar;
+    if not_verbose {
+        bar = ProgressBar::hidden();
+    } else {
+        bar = print_consts::bar(p_count);
+        bar.set_prefix("Purging");
+    }
+    let now = Instant::now();
+    packages
+        .into_iter()
+        .progress_with(bar.clone()) // the last steps
+        .for_each(|p| {
+            bar.set_message(format!("{p}"));
+            bar.println(format!(
+                "{:>12} {p} ({})",
+                print_consts::green("Deleting"),
+                p.download_dir(),
+            ));
+            p.purge()
+        });
 
     // run multiple times because the algorithm goes from top to bottom, stupidly.
     for _ in 0..3 {
@@ -240,6 +259,13 @@ fn purge(cfg: &mut ConfigFile) {
             eprintln!("Unable to remove empty directorys: {e}")
         }
     }
+    println!(
+        "{:>12} purge {} package{} in {}",
+        print_consts::green("Finished"),
+        HumanCount(p_count),
+        if p_count > 0 { "s" } else { "" },
+        HumanDuration(now.elapsed())
+    )
 }
 
 fn tree(
@@ -253,15 +279,14 @@ fn tree(
     } else {
         ".\n".to_string()
     };
+    let mut count: u64 = 0;
     iter(
         &mut cfg.packages,
         "",
         &mut tree,
         match charset {
-            CharSet::UTF8 => "├──", // believe it or not, these are unlike
-            CharSet::ASCII => "|--",      // its hard to tell, with ligatures enabled
-                                           // and rustfmt wants to indent like
-                                           // it must not be very stabled
+            CharSet::UTF8 => "├──", // believe it or not, these are quite unlike
+            CharSet::ASCII => "|--",      // its hard to tell, with ligatures enable
         },
         match charset {
             CharSet::UTF8 => "└──",
@@ -270,7 +295,9 @@ fn tree(
         prefix,
         print_tarballs,
         0,
+        &mut count,
     );
+    tree.push_str(format!("{} dependencies", HumanCount(count)).as_str());
 
     fn iter(
         packages: &mut Vec<Package>,
@@ -281,11 +308,13 @@ fn tree(
         prefix_type: PrefixType,
         print_tarballs: bool,
         depth: u32,
+        count: &mut u64,
     ) {
         // the index is used to decide if the package is the last package,
         // so we can use a L instead of a T.
         let mut tmp: String;
         let mut index = packages.len();
+        *count += index as u64;
         for p in packages {
             let name = p.to_string();
             index -= 1;
@@ -323,6 +352,7 @@ fn tree(
                     prefix_type,
                     print_tarballs,
                     depth + 1,
+                    count,
                 );
             }
         }
@@ -368,7 +398,7 @@ fn gpm() {
     let cfg_file = &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into());
     update(cfg_file, false, false);
     assert_eq!(test_utils::hashd("addons").join("|"), "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329|8e77e3adf577d32c8bc98981f05d40b2eb303271da08bfa7e205d3f27e188bd7|a625595a71b159e33b3d1ee6c13bea9fc4372be426dd067186fe2e614ce76e3c|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c850a9300388d6da1566c12a389927c3353bf931c4d6ea59b02beb302aac03ea|d060936e5f1e8b1f705066ade6d8c6de90435a91c51f122905a322251a181a5c|d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5|d794f3cee783779f50f37a53e1d46d9ebbc5ee7b37c36d7b6ee717773b6955cd|e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87");
-    purge(cfg_file);
+    purge(cfg_file, false);
     assert_eq!(test_utils::hashd("addons"), vec![] as Vec<String>);
     assert_eq!(
         tree(
@@ -381,20 +411,40 @@ fn gpm() {
         .skip(1)
         .collect::<Vec<&str>>()
         .join("\n"),
-        "└── @bendn/test@2.0.10\n    └── @bendn/gdcli@1.2.5"
+        "└── @bendn/test@2.0.10\n    └── @bendn/gdcli@1.2.5\n2 dependencies"
     );
 }
 
+/// Remember to use {:>12}
 pub mod print_consts {
     use console::{style, StyledObject};
+    use indicatif::{ProgressBar, ProgressStyle};
 
     #[inline]
-    pub fn err() -> StyledObject<&'static str> {
-        style("err").red().bold()
+    pub fn err() -> StyledObject<String> {
+        style(format!("Error")).red().bold()
     }
 
     #[inline]
-    pub fn warn() -> StyledObject<&'static str> {
-        style("err").yellow().bold()
+    pub fn warn() -> StyledObject<String> {
+        style(format!("Warn")).yellow().bold()
+    }
+
+    #[inline]
+    pub fn green(t: &str) -> StyledObject<&str> {
+        style(t).green().bold()
+    }
+
+    #[inline]
+    pub fn bar(len: u64) -> ProgressBar {
+        let bar = ProgressBar::new(len);
+        bar.set_style(
+            ProgressStyle::with_template(
+                "{prefix:>12.cyan.bold} [{bar:20.green}] {human_pos}/{human_len}: {wide_msg}",
+            )
+            .unwrap()
+            .progress_chars("-> "),
+        );
+        bar
     }
 }

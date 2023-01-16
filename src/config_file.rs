@@ -1,6 +1,7 @@
 use crate::package::Package;
+use anyhow::Result;
+use console::style;
 use serde::Deserialize;
-use serde_json::Result;
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]
@@ -22,6 +23,13 @@ struct ConfigWrapper {
     packages: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+pub enum ConfigType {
+    JSON,
+    YAML,
+    TOML,
+}
+
 impl From<ConfigWrapper> for ConfigFile {
     fn from(from: ConfigWrapper) -> Self {
         Self {
@@ -38,19 +46,45 @@ impl ConfigFile {
     /// Creates a new [ConfigFile] from the given path.
     /// Panics if the file doesn't exist, or the file cant be parsed as toml, hjson or yaml.
     pub fn new(contents: &String) -> Self {
-        type W = ConfigWrapper;
-        #[rustfmt::skip]
-        let mut cfg: ConfigFile =
-            if let Ok(w) = deser_hjson::from_str::<W>(contents) { w.into() }
-            else if let Ok(w) = serde_yaml::from_str::<W>(contents) { w.into() }
-            else if let Ok(w) = toml::from_str::<W>(contents) { w.into() }
-            else { panic!("Failed to parse the config file") };
+        if contents.len() == 0 {
+            panic!("Empty CFG");
+        }
+
+        // definetly not going to backfire
+        let mut cfg = if contents.as_bytes()[0] == b'{' {
+            Self::parse(contents, ConfigType::JSON).expect("Parsing CFG from JSON should work")
+        } else if contents.as_bytes()[0] == b'[' {
+            Self::parse(contents, ConfigType::TOML).expect("Parsing CFG from TOML should work")
+        } else {
+            for i in [ConfigType::JSON, ConfigType::YAML, ConfigType::TOML].into_iter() {
+                let res = Self::parse(contents, i.clone());
+
+                // im sure theres some kind of idiomatic rust way to do this that i dont know of
+                if res.is_ok() {
+                    return res.unwrap();
+                }
+
+                println!(
+                    "{:>12} Parsing CFG from {:#?} failed: `{}` (ignore if cfg not written in {:#?})",
+                    crate::print_consts::warn(),
+                    i,
+                    style(res.unwrap_err()).red(),
+                    i
+                )
+            }
+            panic!("Parsing CFG failed (see above warnings to find out why)");
+        };
         cfg.packages.sort();
         cfg
     }
 
-    pub fn from_json(json: &String) -> Result<Self> {
-        Ok(serde_json::from_str::<ConfigWrapper>(json)?.into())
+    pub fn parse(txt: &String, t: ConfigType) -> Result<Self> {
+        type W = ConfigWrapper;
+        Ok(match t {
+            ConfigType::TOML => toml::from_str::<W>(txt)?.into(),
+            ConfigType::JSON => deser_hjson::from_str::<W>(txt)?.into(),
+            ConfigType::YAML => serde_yaml::from_str::<W>(txt)?.into(),
+        })
     }
 
     /// Creates a lockfile for this config file.

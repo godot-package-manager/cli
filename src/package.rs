@@ -161,11 +161,11 @@ impl Package {
                                 else if let Ok(c) = get(self.download_dir()) { Some(c) }
                                 else { None };
         if let Some(c) = c {
-            if let Ok(n) = ConfigFile::from_json(&c) {
+            if let Ok(n) = ConfigFile::parse(&c, crate::config_file::ConfigType::JSON) {
                 return n;
             }
         }
-        ConfigFile::from_json(
+        ConfigFile::parse(
             &ureq::get(&format!(
                 "https://cdn.jsdelivr.net/npm/{}@{}/package.json",
                 self.name, self.version,
@@ -174,6 +174,7 @@ impl Package {
             .expect("Getting the package config file should not fail")
             .into_string()
             .expect("The package config file should be valid text"),
+            crate::config_file::ConfigType::JSON,
         )
         .expect("The package config file should be correct/valid JSON")
     }

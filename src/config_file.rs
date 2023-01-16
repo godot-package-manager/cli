@@ -43,7 +43,7 @@ impl From<ConfigWrapper> for ConfigFile {
 }
 
 impl ConfigFile {
-    /// Creates a new [ConfigFile] from the given path.
+    /// Creates a new [ConfigFile] from the given text
     /// Panics if the file doesn't exist, or the file cant be parsed as toml, hjson or yaml.
     pub fn new(contents: &String) -> Self {
         if contents.len() == 0 {
@@ -52,9 +52,10 @@ impl ConfigFile {
 
         // definetly not going to backfire
         let mut cfg = if contents.as_bytes()[0] == b'{' {
+            // json gets brute forced first so this isnt really needed
             Self::parse(contents, ConfigType::JSON).expect("Parsing CFG from JSON should work")
-        } else if contents.as_bytes()[0] == b'[' {
-            Self::parse(contents, ConfigType::TOML).expect("Parsing CFG from TOML should work")
+        } else if contents.len() > 3 && contents[..3] == *"---" {
+            Self::parse(contents, ConfigType::YAML).expect("Parsing CFG from YAML should work")
         } else {
             for i in [ConfigType::JSON, ConfigType::YAML, ConfigType::TOML].into_iter() {
                 let res = Self::parse(contents, i.clone());

@@ -1,5 +1,6 @@
 mod config_file;
 mod package;
+mod theme;
 
 use crate::package::Package;
 use anyhow::Result;
@@ -386,40 +387,45 @@ fn tree(
 
 fn init(mut packages: Vec<Package>) -> Result<()> {
     let mut c = ConfigFile::default();
-    if packages.is_empty() && putils::confirm("Add a package?")? {
+    if packages.is_empty() && putils::confirm("Add a package?", true)? {
         while {
-            packages.push(putils::input("Enter package")?);
-            putils::confirm("Add another package?")?
+            packages.push(putils::input("Package?")?);
+            putils::confirm("Add another package?", true)?
         } {}
     };
     c.packages = packages;
     let types = vec![ConfigType::JSON, ConfigType::YAML, ConfigType::TOML];
 
     let mut path = Path::new(&putils::input_with_default::<String>(
-        "Config file save location",
+        "Config file save location?",
         "godot.package".into(),
     )?)
     .to_path_buf();
     while path.exists() {
-        if !putils::confirm("This will overwrite your existing config. Are you sure?")? {
-            path = Path::new(&putils::input_with_default::<String>(
-                "Config file save location",
-                "godot.package".into(),
-            )?)
-            .to_path_buf();
-        } else {
+        if putils::confirm("This file already exists. Replace?", false)? {
             break;
+        } else {
+            path = Path::new(&putils::input::<String>("Config file save location?")?).to_path_buf();
         }
+    }
+    while write(&path, "").is_err() {
+        path = Path::new(&putils::input_with_default::<String>(
+            "Chosen file not accessible, try again:",
+            "godot.package".into(),
+        )?)
+        .to_path_buf();
     }
     let c_text = c
         .clone()
-        .print(types[putils::select(&types, "Language to save in", 2)?]);
+        .print(types[putils::select(&types, "Language to save in:", 2)?]);
     write(path, c_text)?;
-    if putils::confirm("Would you like to view the dependency tree?")? {
+    if putils::confirm("Would you like to view the dependency tree?", true)? {
         println!("{}", tree(&mut c, CharSet::UTF8, PrefixType::Indent, false));
     };
 
-    if c.packages.len() > 0 && putils::confirm("Would you like to install your new packages?")? {
+    if c.packages.len() > 0
+        && putils::confirm("Would you like to install your new packages?", true)?
+    {
         update(&mut c, true, false);
     };
     println!("Goodbye!");
@@ -484,8 +490,9 @@ fn gpm() {
 /// Print utilities.
 /// Remember to use {:>12}
 pub mod putils {
+    use crate::theme::BasicTheme;
     use console::{style, StyledObject};
-    use dialoguer::{theme::SimpleTheme, Confirm, Input, Select};
+    use dialoguer::{Confirm, Input, Select};
     use indicatif::{ProgressBar, ProgressStyle};
     use std::io::Result;
     use std::str::FromStr;
@@ -497,7 +504,7 @@ pub mod putils {
 
     #[inline]
     pub fn select<T: ToString>(items: &Vec<T>, p: &str, default: usize) -> Result<usize> {
-        Select::with_theme(&SimpleTheme)
+        Select::with_theme(&BasicTheme::default())
             .items(items)
             .with_prompt(p)
             .default(default)
@@ -505,10 +512,11 @@ pub mod putils {
     }
 
     #[inline]
-    pub fn confirm(p: &str) -> Result<bool> {
+    pub fn confirm(p: &str, default: bool) -> Result<bool> {
         // TODO: theme
-        Ok(Confirm::with_theme(&SimpleTheme)
+        Ok(Confirm::with_theme(&BasicTheme::default())
             .with_prompt(p)
+            .default(default)
             .interact()?)
     }
 
@@ -518,7 +526,7 @@ pub mod putils {
         T: Clone + ToString + FromStr,
         <T as FromStr>::Err: std::fmt::Debug + ToString,
     {
-        Input::with_theme(&SimpleTheme)
+        Input::with_theme(&BasicTheme::default())
             .with_prompt(p)
             .interact_text()
     }
@@ -529,7 +537,7 @@ pub mod putils {
         T: Clone + ToString + FromStr,
         <T as FromStr>::Err: std::fmt::Debug + ToString,
     {
-        Input::with_theme(&SimpleTheme)
+        Input::with_theme(&BasicTheme::default())
             .with_prompt(p)
             .default(d)
             .interact_text()

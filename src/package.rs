@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn download() {
         let _t = crate::test_utils::mktemp();
-        let mut p = Package::new("@bendn/test".into(), "2.0.10".into()).unwrap();
+        let mut p = Package::from_str("@bendn/test:2.0.10").unwrap();
         p.download();
         assert_eq!(
             crate::test_utils::hashd(p.download_dir().as_str()),
@@ -508,9 +508,7 @@ mod tests {
     fn dep_map() {
         // no fs was touched in the making of this test
         assert_eq!(
-            Package::new("@bendn/test".into(), "2.0.10".into())
-                .unwrap()
-                .dep_map(),
+            Package::from_str("@bendn/test@2.0.10").unwrap().dep_map(),
             HashMap::from([
                 ("test".into(), "addons/@bendn/test".into()),
                 ("@bendn/test".into(), "addons/@bendn/test".into()),
@@ -529,7 +527,7 @@ mod tests {
     #[test]
     fn modify_load() {
         let _t = crate::test_utils::mktemp();
-        let mut p = Package::new("@bendn/test".into(), "2.0.10".into()).unwrap();
+        let mut p = Package::from_str("@bendn/test=2.0.10".into()).unwrap();
         let dep_map = &p.dep_map();
         let cwd = &Path::new("addons/@bendn/test").into(); // holy shit rust is smart -- it knows this needs to be a pathbuf
         p.download();

@@ -1,4 +1,5 @@
 use crate::config_file::ConfigFile;
+use anyhow::{anyhow, Result};
 use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
 use serde::Serialize;
@@ -7,6 +8,7 @@ use sha1::{Digest, Sha1};
 use std::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, write};
 use std::io;
 use std::path::{Component::Normal, Path, PathBuf};
+use std::str::FromStr;
 use std::{collections::HashMap, fmt};
 use tar::{Archive, EntryType::Directory};
 
@@ -30,7 +32,41 @@ pub struct Package {
     manifest: String,
 }
 
+impl FromStr for Package {
+    type Err = anyhow::Error;
+
+    /// Supports 3 version syntax variations: `:`, `=`, `@`
+    /// if version not specified, will fetch latest.
+    fn from_str(s: &str) -> Result<Self> {
+        fn split_p(s: &str, d: char) -> Result<Package> {
+            let Some((p, v)) = s.split_once(d) else { return Package::new_nover(s.to_string()); };
+            Package::new(p.to_string(), v.to_string())
+        }
+        // i hope none of these can be in npm package names
+        if s.contains(':') {
+            // @bendn/gdcli:1.2.5
+            return split_p(s, ':');
+        } else if s.contains('=') {
+            // @bendn/gdcli=1.2.5
+            return split_p(s, '=');
+        } else {
+            // @bendn/gdcli@1.2.5
+            if s.as_bytes()[0] == b'@' {
+                let mut owned_s = s.to_string();
+                owned_s.remove(0);
+                let Some((p, v)) = owned_s
+                .split_once('@') else {
+                    return Self::new_nover(s.to_string());
+                };
+                return Self::new(format!("@{p}"), v.to_string());
+            }
+            return split_p(s, '@');
+        };
+    }
+}
+
 impl Package {
+    #[inline]
     /// Does this package have dependencies?
     pub fn has_deps(&self) -> bool {
         !self.dependencies.is_empty()
@@ -40,12 +76,38 @@ impl Package {
     /// Calls the Package::get_deps() function, so it will
     /// try to access the fs, and if it fails, it will make
     /// calls to cdn.jsdelivr.net to get the `package.json` file.
-    pub fn new(name: String, version: String) -> Package {
+    pub fn new(name: String, version: String) -> Result<Package> {
         let mut p = Package::default();
         p.name = name;
         p.version = version;
-        p.get_deps();
-        p
+        p.get_deps()?;
+        Ok(p)
+    }
+
+    /// Creates a new [Package] from a name, gets the version with get_latest_version()
+    pub fn new_nover(name: String) -> Result<Package> {
+        let resp = ureq::get(&format!("{REGISTRY}/{name}"))
+            .call()?
+            .into_string()?;
+        if resp == "\"Not Found\"" {
+            return Err(anyhow!("Package {name} was not found"));
+        };
+        let resp = serde_json::from_str::<JValue>(&resp)?;
+        let v = resp
+            .get("dist-tags")
+            .ok_or(anyhow!("No dist tags!"))?
+            .get("latest")
+            .ok_or(anyhow!("No latest!"))?
+            .as_str()
+            .ok_or(anyhow!("Latest not string!"))?;
+        let mut p = Package::new(name, v.to_string())?;
+        p.manifest = resp
+            .get("versions")
+            .ok_or(anyhow!("No versions!"))?
+            .get(v)
+            .ok_or(anyhow!("No latest version!"))?
+            .to_string();
+        Ok(p)
     }
 
     /// Stringifies this [Package], format my_p@1.0.0.
@@ -55,8 +117,7 @@ impl Package {
 
     /// Returns wether this package is installed.
     pub fn is_installed(&self) -> bool {
-        Path::new(&self.direct_download_dir()).exists()
-            || Path::new(&self.indirect_download_dir()).exists()
+        Path::new(&self.download_dir()).exists()
     }
 
     /// Deletes this [Package].
@@ -152,7 +213,7 @@ impl Package {
     /// Gets the [ConfigFile] for this [Package].
     /// Will attempt to read the `package.json` file, if this package is installed.
     /// Else it will make network calls to `cdn.jsdelivr.net`.
-    pub fn get_config_file(&self) -> ConfigFile {
+    pub fn get_config_file(&self) -> Result<ConfigFile> {
         fn get(f: String) -> io::Result<String> {
             read_to_string(Path::new(&f).join("package.json"))
         }
@@ -162,7 +223,7 @@ impl Package {
                                 else { None };
         if let Some(c) = c {
             if let Ok(n) = ConfigFile::parse(&c, crate::config_file::ConfigType::JSON) {
-                return n;
+                return Ok(n);
             }
         }
         ConfigFile::parse(
@@ -171,17 +232,17 @@ impl Package {
                 self.name, self.version,
             ))
             .call()
-            .expect("Getting the package config file should not fail")
-            .into_string()
-            .expect("The package config file should be valid text"),
+            .map_err(|_| {
+                anyhow!("Request to cdn.jsdelivr.net failed, package/version doesnt exist")
+            })?
+            .into_string()?,
             crate::config_file::ConfigType::JSON,
         )
-        .expect("The package config file should be correct/valid JSON")
     }
 
     /// Gets the package manifest and puts it in `self.manfiest`.
     fn get_manifest(&mut self) {
-        let resp = ureq::get(&format!("{}/{}/{}", REGISTRY, self.name, self.version))
+        let resp = ureq::get(&format!("{REGISTRY}/{}/{}", self.name, self.version))
             .call()
             .expect("Getting the package manifest file should not fail")
             .into_string()
@@ -237,13 +298,13 @@ impl Package {
     }
 
     /// Gets the dependencies of this [Package], placing them in `self.dependencies`.
-    fn get_deps(&mut self) -> &Vec<Package> {
-        let cfg = self.get_config_file();
+    fn get_deps(&mut self) -> Result<&Vec<Package>> {
+        let cfg = self.get_config_file()?;
         cfg.packages.into_iter().for_each(|mut dep| {
             dep.indirect = true;
             self.dependencies.push(dep);
         });
-        &self.dependencies
+        Ok(&self.dependencies)
     }
 }
 
@@ -340,7 +401,7 @@ impl Package {
         };
         eprintln!(
             "{:>12} Could not find path for {path:#?}",
-            crate::print_consts::warn()
+            crate::putils::warn()
         );
         return path.to_path_buf();
     }
@@ -429,7 +490,7 @@ mod tests {
     #[test]
     fn download() {
         let _t = crate::test_utils::mktemp();
-        let mut p = Package::new("@bendn/test".into(), "2.0.10".into());
+        let mut p = Package::from_str("@bendn/test:2.0.10").unwrap();
         p.download();
         assert_eq!(
             crate::test_utils::hashd(p.download_dir().as_str()),
@@ -447,7 +508,7 @@ mod tests {
     fn dep_map() {
         // no fs was touched in the making of this test
         assert_eq!(
-            Package::new("@bendn/test".into(), "2.0.10".into()).dep_map(),
+            Package::from_str("@bendn/test@2.0.10").unwrap().dep_map(),
             HashMap::from([
                 ("test".into(), "addons/@bendn/test".into()),
                 ("@bendn/test".into(), "addons/@bendn/test".into()),
@@ -466,7 +527,7 @@ mod tests {
     #[test]
     fn modify_load() {
         let _t = crate::test_utils::mktemp();
-        let mut p = Package::new("@bendn/test".into(), "2.0.10".into());
+        let mut p = Package::from_str("@bendn/test=2.0.10".into()).unwrap();
         let dep_map = &p.dep_map();
         let cwd = &Path::new("addons/@bendn/test").into(); // holy shit rust is smart -- it knows this needs to be a pathbuf
         p.download();

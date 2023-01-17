@@ -1,17 +1,17 @@
 mod config_file;
 mod package;
+mod theme;
 
 use crate::package::Package;
+use anyhow::Result;
 use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
-use config_file::ConfigFile;
+use config_file::{ConfigFile, ConfigType};
 use console::{self, Term};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressIterator};
-use std::env::current_dir;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
-use std::io::{stdin, Read, Result};
-use std::panic;
+use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::{env::current_dir, panic, time::Instant};
 
 #[derive(Parser)]
 #[command(name = "gpm")]
@@ -75,6 +75,10 @@ Produces output like
         /// To print download urls next to the package name.
         print_tarballs: bool,
     },
+    Init {
+        #[arg(long = "packages", num_args = 0..)]
+        packages: Vec<Package>,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -99,7 +103,7 @@ enum PrefixType {
 
 fn main() {
     panic::set_hook(Box::new(|panic_info| {
-        eprint!("{:>12} ", print_consts::err());
+        eprint!("{:>12} ", putils::err());
         if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
             eprint!("{s}");
         } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
@@ -122,32 +126,53 @@ fn main() {
         ColorChoice::Never => set_colors(false),
         ColorChoice::Auto => set_colors(Term::stdout().is_term() && Term::stderr().is_term()),
     }
-    let mut contents = String::from("");
-    if args.config_file == Path::new("-") {
-        let bytes = stdin()
-            .read_to_string(&mut contents)
-            .expect("Stdin read should be ok");
-        if bytes == 0 {
-            panic!("Stdin should not be empty");
+    fn get_cfg(path: PathBuf) -> ConfigFile {
+        let mut contents = String::from("");
+        if path == Path::new("-") {
+            let bytes = stdin()
+                .read_to_string(&mut contents)
+                .expect("Stdin read should be ok");
+            if bytes == 0 {
+                panic!("Stdin should not be empty");
+            };
+        } else {
+            contents = read_to_string(path).expect("Reading config file should be ok");
         };
-    } else {
-        contents = read_to_string(args.config_file).expect("Reading config file should be ok");
-    };
-    let mut cfg_file = ConfigFile::new(&contents);
+        ConfigFile::new(&contents)
+    }
+    fn lock(cfg: &mut ConfigFile, path: PathBuf) {
+        let lockfile = cfg.lock();
+        if path == Path::new("-") {
+            println!("{lockfile}");
+        } else {
+            write(path, lockfile).expect("Writing lock file should be ok");
+        }
+    }
     match args.action {
-        Actions::Update => update(&mut cfg_file, true, args.not_verbose),
-        Actions::Purge => purge(&mut cfg_file, args.not_verbose),
+        Actions::Update => {
+            let c = &mut get_cfg(args.config_file);
+            update(c, true, args.not_verbose);
+            lock(c, args.lock_file);
+        }
+        Actions::Purge => {
+            let c = &mut get_cfg(args.config_file);
+            purge(c, args.not_verbose);
+            lock(c, args.lock_file);
+        }
         Actions::Tree {
             charset,
             prefix,
             print_tarballs,
-        } => print!("{}", tree(&mut cfg_file, charset, prefix, print_tarballs)),
-    }
-    let lockfile = cfg_file.lock();
-    if args.lock_file == Path::new("-") {
-        println!("{lockfile}");
-    } else {
-        write(args.lock_file, lockfile).expect("Writing lock file should be ok");
+        } => print!(
+            "{}",
+            tree(
+                &mut get_cfg(args.config_file), // no locking needed
+                charset,
+                prefix,
+                print_tarballs
+            )
+        ),
+        Actions::Init { packages } => init(packages).expect("Initializing cfg should be ok"),
     }
 }
 
@@ -164,7 +189,7 @@ fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
     if not_verbose {
         bar = ProgressBar::hidden();
     } else {
-        bar = print_consts::bar(p_count);
+        bar = putils::bar(p_count);
         bar.set_prefix("Updating");
     };
     let now = Instant::now();
@@ -179,16 +204,16 @@ fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
                     bar.suspend(|| {
                         eprintln!(
                             "{:>12} modification of {p} failed with err {e}",
-                            print_consts::warn()
+                            putils::warn()
                         )
                     });
                 }
             }
-            bar.suspend(|| println!("{:>12} {p}", print_consts::green("Downloaded")));
+            bar.suspend(|| println!("{:>12} {p}", putils::green("Downloaded")));
         });
     println!(
         "{:>12} updated {} package{} in {}",
-        print_consts::green("Finished"),
+        putils::green("Finished"),
         HumanCount(p_count),
         if p_count > 0 { "s" } else { "" },
         HumanDuration(now.elapsed())
@@ -205,7 +230,7 @@ fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
 /// ```
 /// dir 1 and 2 will be deleted.
 /// Run multiple times to delete `dir0`.
-fn recursive_delete_empty(dir: String) -> Result<()> {
+fn recursive_delete_empty(dir: String) -> std::io::Result<()> {
     if read_dir(&dir)?.next().is_none() {
         return remove_dir(dir);
     }
@@ -236,7 +261,7 @@ fn purge(cfg: &mut ConfigFile, not_verbose: bool) {
     if not_verbose {
         bar = ProgressBar::hidden();
     } else {
-        bar = print_consts::bar(p_count);
+        bar = putils::bar(p_count);
         bar.set_prefix("Purging");
     }
     let now = Instant::now();
@@ -247,7 +272,7 @@ fn purge(cfg: &mut ConfigFile, not_verbose: bool) {
             bar.set_message(format!("{p}"));
             bar.println(format!(
                 "{:>12} {p} ({})",
-                print_consts::green("Deleting"),
+                putils::green("Deleting"),
                 p.download_dir(),
             ));
             p.purge()
@@ -261,7 +286,7 @@ fn purge(cfg: &mut ConfigFile, not_verbose: bool) {
     }
     println!(
         "{:>12} purge {} package{} in {}",
-        print_consts::green("Finished"),
+        putils::green("Finished"),
         HumanCount(p_count),
         if p_count > 0 { "s" } else { "" },
         HumanDuration(now.elapsed())
@@ -360,6 +385,53 @@ fn tree(
     tree
 }
 
+fn init(mut packages: Vec<Package>) -> Result<()> {
+    let mut c = ConfigFile::default();
+    if packages.is_empty() && putils::confirm("Add a package?", true)? {
+        while {
+            packages.push(putils::input("Package?")?);
+            putils::confirm("Add another package?", true)?
+        } {}
+    };
+    c.packages = packages;
+    let types = vec![ConfigType::JSON, ConfigType::YAML, ConfigType::TOML];
+
+    let mut path = Path::new(&putils::input_with_default::<String>(
+        "Config file save location?",
+        "godot.package".into(),
+    )?)
+    .to_path_buf();
+    while path.exists() {
+        if putils::confirm("This file already exists. Replace?", false)? {
+            break;
+        } else {
+            path = Path::new(&putils::input::<String>("Config file save location?")?).to_path_buf();
+        }
+    }
+    while write(&path, "").is_err() {
+        path = Path::new(&putils::input_with_default::<String>(
+            "Chosen file not accessible, try again:",
+            "godot.package".into(),
+        )?)
+        .to_path_buf();
+    }
+    let c_text = c
+        .clone()
+        .print(types[putils::select(&types, "Language to save in:", 2)?]);
+    write(path, c_text)?;
+    if putils::confirm("Would you like to view the dependency tree?", true)? {
+        println!("{}", tree(&mut c, CharSet::UTF8, PrefixType::Indent, false));
+    };
+
+    if c.packages.len() > 0
+        && putils::confirm("Would you like to install your new packages?", true)?
+    {
+        update(&mut c, true, false);
+    };
+    println!("Goodbye!");
+    Ok(())
+}
+
 #[cfg(test)]
 mod test_utils {
     use glob::glob;
@@ -415,14 +487,60 @@ fn gpm() {
     );
 }
 
+/// Print utilities.
 /// Remember to use {:>12}
-pub mod print_consts {
+pub mod putils {
+    use crate::theme::BasicTheme;
     use console::{style, StyledObject};
+    use dialoguer::{Confirm, Input, Select};
     use indicatif::{ProgressBar, ProgressStyle};
+    use std::io::Result;
+    use std::str::FromStr;
 
     #[inline]
     pub fn err() -> StyledObject<String> {
         style(format!("Error")).red().bold()
+    }
+
+    #[inline]
+    pub fn select<T: ToString>(items: &Vec<T>, p: &str, default: usize) -> Result<usize> {
+        Select::with_theme(&BasicTheme::default())
+            .items(items)
+            .with_prompt(p)
+            .default(default)
+            .interact()
+    }
+
+    #[inline]
+    pub fn confirm(p: &str, default: bool) -> Result<bool> {
+        // TODO: theme
+        Ok(Confirm::with_theme(&BasicTheme::default())
+            .with_prompt(p)
+            .default(default)
+            .interact()?)
+    }
+
+    #[inline]
+    pub fn input<T>(p: &str) -> Result<T>
+    where
+        T: Clone + ToString + FromStr,
+        <T as FromStr>::Err: std::fmt::Debug + ToString,
+    {
+        Input::with_theme(&BasicTheme::default())
+            .with_prompt(p)
+            .interact_text()
+    }
+
+    #[inline]
+    pub fn input_with_default<T>(p: &str, d: T) -> Result<T>
+    where
+        T: Clone + ToString + FromStr,
+        <T as FromStr>::Err: std::fmt::Debug + ToString,
+    {
+        Input::with_theme(&BasicTheme::default())
+            .with_prompt(p)
+            .default(d)
+            .interact_text()
     }
 
     #[inline]

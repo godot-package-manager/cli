@@ -1,10 +1,10 @@
 use crate::package::Package;
 use anyhow::Result;
 use console::style;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 /// The config file: parsed from godot.package, usually.
 /// Contains only a list of [Package]s, currently.
 pub struct ConfigFile {
@@ -12,7 +12,7 @@ pub struct ConfigFile {
     // hooks: there are no hooks now
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(default)]
 /// A wrapper to [ConfigFile]. This _is_ necessary.
 /// Any alternatives will end up being more ugly than this. (trust me i tried)
@@ -23,11 +23,17 @@ struct ConfigWrapper {
     packages: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ConfigType {
     JSON,
     YAML,
     TOML,
+}
+
+impl std::fmt::Display for ConfigType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:#?}", self)
+    }
 }
 
 impl From<ConfigWrapper> for ConfigFile {
@@ -36,15 +42,36 @@ impl From<ConfigWrapper> for ConfigFile {
             packages: from
                 .packages
                 .into_iter()
-                .map(|(name, version)| Package::new(name, version))
-                .collect::<Vec<Package>>(),
+                .map(|(name, version)| Package::new(name, version).unwrap())
+                .collect(),
+        }
+    }
+}
+
+impl From<ConfigFile> for ConfigWrapper {
+    fn from(from: ConfigFile) -> Self {
+        Self {
+            packages: from
+                .packages
+                .into_iter()
+                .map(|p| (p.name, p.version))
+                .collect(),
         }
     }
 }
 
 impl ConfigFile {
+    pub fn print(self, t: ConfigType) -> String {
+        let w = ConfigWrapper::from(self);
+        match t {
+            ConfigType::JSON => serde_json::to_string_pretty(&w).unwrap(),
+            ConfigType::YAML => serde_yaml::to_string(&w).unwrap(),
+            ConfigType::TOML => toml::to_string_pretty(&w).unwrap(),
+        }
+    }
+
     /// Creates a new [ConfigFile] from the given text
-    /// Panics if the file doesn't exist, or the file cant be parsed as toml, hjson or yaml.
+    /// Panics if the file cant be parsed as toml, hjson or yaml.
     pub fn new(contents: &String) -> Self {
         if contents.len() == 0 {
             panic!("Empty CFG");
@@ -67,7 +94,7 @@ impl ConfigFile {
 
                 println!(
                     "{:>12} Parsing CFG from {:#?} failed: `{}` (ignore if cfg not written in {:#?})",
-                    crate::print_consts::warn(),
+                    crate::putils::warn(),
                     i,
                     style(res.unwrap_err()).red(),
                     i

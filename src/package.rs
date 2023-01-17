@@ -112,7 +112,7 @@ impl Package {
 
     /// Stringifies this [Package], format my_p@1.0.0.
     pub fn to_string(&self) -> String {
-        format!("{}:{}", self.name, self.version)
+        format!("{}@{}", self.name, self.version)
     }
 
     /// Returns wether this package is installed.

@@ -332,13 +332,14 @@ impl Package {
         }
         SCRIPT_LOAD_R
             .replace_all(&t, |c: &Captures| {
-                let m = Path::new(c.get(2).unwrap().as_str());
-                format!(
-                    "{}load('res://{}')",
-                    if c.get(1).is_some() { "pre" } else { "" },
-                    self.modify_load(m.strip_prefix("res://").unwrap_or(m), cwd, dep_map)
-                        .display()
-                )
+                let p = Path::new(c.get(2).unwrap().as_str());
+                let res = self.modify_load(p.strip_prefix("res://").unwrap_or(p), cwd, dep_map);
+                let preloaded = if c.get(1).is_some() { "pre" } else { "" };
+                if res == p {
+                    format!("{preloaded}load('{}')", p.display())
+                } else {
+                    format!("{preloaded}load('res://{}')", res.display())
+                }
             })
             .to_string()
     }
@@ -366,17 +367,18 @@ impl Package {
         }
         TRES_LOAD_R
             .replace_all(&t, |c: &Captures| {
-                format!(
-                    r#"[ext_resource path="res://{}""#,
-                    self.modify_load(
-                        Path::new(c.get(1).unwrap().as_str())
-                            .strip_prefix("res://")
-                            .expect("TextResource path should be absolute"),
-                        cwd,
-                        dep_map,
-                    )
-                    .display()
-                )
+                let p = Path::new(c.get(1).unwrap().as_str());
+                let res = self.modify_load(
+                    p.strip_prefix("res://")
+                        .expect("TextResource path should be absolute"),
+                    cwd,
+                    dep_map,
+                );
+                if res == p {
+                    format!(r#"[ext_resource path="{}""#, p.display())
+                } else {
+                    format!(r#"[ext_resource path="res://{}""#, res.display())
+                }
             })
             .to_string()
     }

@@ -12,6 +12,7 @@ use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
 use std::{env::current_dir, panic, time::Instant};
+use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(name = "gpm")]
@@ -194,8 +195,7 @@ fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
     };
     let now = Instant::now();
     packages
-        .into_iter()
-        .progress_with(bar.clone())
+        .into_par_iter()
         .for_each(|mut p| {
             bar.set_message(format!("{p}"));
             p.download();
@@ -209,6 +209,7 @@ fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
                     });
                 }
             }
+            bar.inc(1);
             bar.suspend(|| println!("{:>12} {p}", putils::green("Downloaded")));
         });
     println!(

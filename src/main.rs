@@ -7,12 +7,15 @@ use anyhow::Result;
 use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
 use config_file::{ConfigFile, ConfigType};
 use console::{self, Term};
+use futures::stream::{self, StreamExt};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressIterator};
+use package::ParsedPackage;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::channel;
+use std::thread;
 use std::{env::current_dir, panic, time::Instant};
-use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(name = "gpm")]
@@ -78,7 +81,7 @@ Produces output like
     },
     Init {
         #[arg(long = "packages", num_args = 0..)]
-        packages: Vec<Package>,
+        packages: Vec<ParsedPackage>,
     },
 }
 
@@ -102,7 +105,11 @@ enum PrefixType {
     None,
 }
 
-fn main() {
+/// number of buffer slots
+const PARALLEL: usize = 5;
+
+#[tokio::main]
+async fn main() {
     panic::set_hook(Box::new(|panic_info| {
         eprint!("{:>12} ", putils::err());
         if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
@@ -127,7 +134,7 @@ fn main() {
         ColorChoice::Never => set_colors(false),
         ColorChoice::Auto => set_colors(Term::stdout().is_term() && Term::stderr().is_term()),
     }
-    fn get_cfg(path: PathBuf) -> ConfigFile {
+    async fn get_cfg(path: PathBuf) -> ConfigFile {
         let mut contents = String::from("");
         if path == Path::new("-") {
             let bytes = stdin()
@@ -139,7 +146,7 @@ fn main() {
         } else {
             contents = read_to_string(path).expect("Reading config file should be ok");
         };
-        ConfigFile::new(&contents)
+        ConfigFile::new(&contents).await
     }
     fn lock(cfg: &mut ConfigFile, path: PathBuf) {
         let lockfile = cfg.lock();
@@ -149,35 +156,49 @@ fn main() {
             write(path, lockfile).expect("Writing lock file should be ok");
         }
     }
-    match args.action {
-        Actions::Update => {
-            let c = &mut get_cfg(args.config_file);
-            update(c, true, args.not_verbose);
-            lock(c, args.lock_file);
-        }
-        Actions::Purge => {
-            let c = &mut get_cfg(args.config_file);
-            purge(c, args.not_verbose);
-            lock(c, args.lock_file);
-        }
-        Actions::Tree {
-            charset,
-            prefix,
-            print_tarballs,
-        } => print!(
-            "{}",
-            tree(
-                &mut get_cfg(args.config_file), // no locking needed
+    async {
+        match args.action {
+            Actions::Update => {
+                let c = &mut get_cfg(args.config_file).await;
+                update(c, true, args.not_verbose).await;
+                lock(c, args.lock_file);
+            }
+            Actions::Purge => {
+                let c = &mut get_cfg(args.config_file).await;
+                purge(c, args.not_verbose);
+                lock(c, args.lock_file);
+            }
+            Actions::Tree {
                 charset,
                 prefix,
-                print_tarballs
-            )
-        ),
-        Actions::Init { packages } => init(packages).expect("Initializing cfg should be ok"),
+                print_tarballs,
+            } => print!(
+                "{}",
+                tree(
+                    &mut get_cfg(args.config_file).await, // no locking needed
+                    charset,
+                    prefix,
+                    print_tarballs
+                )
+            ),
+            Actions::Init { packages } => {
+                let buf = stream::iter(packages.into_iter())
+                    .map(|pp| async move {
+                        let name = pp.to_string();
+                        pp.into_package()
+                            .await
+                            .expect(format!("Package {name} could not be parsed").as_str())
+                    })
+                    .buffer_unordered(4);
+                let packages = buf.collect::<Vec<Package>>().await;
+                init(packages).await.expect("Initializing cfg should be ok");
+            }
+        }
     }
+    .await;
 }
 
-fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
+async fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
     if !Path::new("./addons/").exists() {
         create_dir("./addons/").expect("Should be able to create addons folder");
     }
@@ -194,24 +215,46 @@ fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
         bar.set_prefix("Updating");
     };
     let now = Instant::now();
-    packages
-        .into_par_iter()
-        .for_each(|mut p| {
-            bar.set_message(format!("{p}"));
-            p.download();
-            if modify {
-                if let Err(e) = p.modify() {
-                    bar.suspend(|| {
-                        eprintln!(
-                            "{:>12} modification of {p} failed with err {e}",
-                            putils::warn()
-                        )
-                    });
+    let (tx, rx) = channel();
+    enum Status {
+        Processing(String),
+        Finished(String),
+    }
+
+    let buf = stream::iter(packages)
+        .map(|mut p| async {
+            let p_name = p.to_string();
+            tx.send(Status::Processing(p_name.clone())).unwrap();
+            async move {
+                p.download().await;
+                if modify {
+                    p.modify().unwrap();
+                };
+            }
+            .await;
+            tx.send(Status::Finished(p_name.clone())).unwrap();
+        })
+        .buffer_unordered(PARALLEL);
+    let handler = thread::spawn(move || {
+        let mut running = vec![];
+        while let Ok(status) = rx.recv() {
+            match status {
+                Status::Processing(p) => {
+                    running.push(p);
+                }
+                Status::Finished(p) => {
+                    running.swap_remove(running.iter().position(|e| e == &p).unwrap());
+                    bar.suspend(|| println!("{:>12} {p}", putils::green("Downloaded")));
+                    bar.inc(1);
                 }
             }
-            bar.inc(1);
-            bar.suspend(|| println!("{:>12} {p}", putils::green("Downloaded")));
-        });
+            bar.set_message(running.join(", "));
+        }
+        bar.finish_and_clear();
+    });
+    let _ = buf.collect::<Vec<()>>().await; // wait till its done
+    drop(tx); // drop the transmitter to break the reciever loop
+    handler.join().unwrap();
     println!(
         "{:>12} updated {} package{} in {}",
         putils::green("Finished"),
@@ -356,11 +399,7 @@ fn tree(
             );
             if print_tarballs {
                 tree.push(' ');
-                tree.push_str(
-                    p.get_tarball()
-                        .expect("Should be able to get tarball")
-                        .as_str(),
-                );
+                tree.push_str(p.manifest.tarball.as_str());
             }
             tree.push('\n');
             if p.has_deps() {
@@ -386,13 +425,31 @@ fn tree(
     tree
 }
 
-fn init(mut packages: Vec<Package>) -> Result<()> {
+async fn init(mut packages: Vec<Package>) -> Result<()> {
     let mut c = ConfigFile::default();
-    if packages.is_empty() && putils::confirm("Add a package?", true)? {
+    if packages.is_empty() {
+        let mut has_asked = false;
+        let mut just_failed = false;
         while {
-            packages.push(putils::input("Package?")?);
-            putils::confirm("Add another package?", true)?
-        } {}
+            if just_failed == true {
+                putils::confirm("Try again?", true)?
+            } else if has_asked == false {
+                putils::confirm("Add a package?", true)?
+            } else {
+                putils::confirm("Add another package?", true)?
+            }
+        } {
+            has_asked = true;
+            let p: ParsedPackage = putils::input("Package?")?;
+            let p_name = p.to_string();
+            let res = p.into_package().await;
+            if let Err(e) = res {
+                putils::fail(format!("{p_name} could not be parsed: {e}").as_str())?;
+                just_failed = true;
+                continue;
+            }
+            packages.push(res.unwrap());
+        }
     };
     c.packages = packages;
     let types = vec![ConfigType::JSON, ConfigType::YAML, ConfigType::TOML];
@@ -427,7 +484,7 @@ fn init(mut packages: Vec<Package>) -> Result<()> {
     if c.packages.len() > 0
         && putils::confirm("Would you like to install your new packages?", true)?
     {
-        update(&mut c, true, false);
+        update(&mut c, true, false).await;
     };
     println!("Goodbye!");
     Ok(())
@@ -465,11 +522,12 @@ mod test_utils {
     }
 }
 
-#[test]
-fn gpm() {
+#[tokio::test]
+async fn gpm() {
     let _t = test_utils::mktemp();
-    let cfg_file = &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into());
-    update(cfg_file, false, false);
+    let cfg_file =
+        &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into()).await;
+    update(cfg_file, false, false).await;
     assert_eq!(test_utils::hashd("addons").join("|"), "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329|8e77e3adf577d32c8bc98981f05d40b2eb303271da08bfa7e205d3f27e188bd7|a625595a71b159e33b3d1ee6c13bea9fc4372be426dd067186fe2e614ce76e3c|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c850a9300388d6da1566c12a389927c3353bf931c4d6ea59b02beb302aac03ea|d060936e5f1e8b1f705066ade6d8c6de90435a91c51f122905a322251a181a5c|d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5|d794f3cee783779f50f37a53e1d46d9ebbc5ee7b37c36d7b6ee717773b6955cd|e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87");
     purge(cfg_file, false);
     assert_eq!(test_utils::hashd("addons"), vec![] as Vec<String>);
@@ -493,8 +551,9 @@ fn gpm() {
 pub mod putils {
     use crate::theme::BasicTheme;
     use console::{style, StyledObject};
-    use dialoguer::{Confirm, Input, Select};
+    use dialoguer::{theme::Theme, Confirm, Input, Select};
     use indicatif::{ProgressBar, ProgressStyle};
+    use std::fmt;
     use std::io::Result;
     use std::str::FromStr;
 
@@ -514,7 +573,6 @@ pub mod putils {
 
     #[inline]
     pub fn confirm(p: &str, default: bool) -> Result<bool> {
-        // TODO: theme
         Ok(Confirm::with_theme(&BasicTheme::default())
             .with_prompt(p)
             .default(default)
@@ -530,6 +588,13 @@ pub mod putils {
         Input::with_theme(&BasicTheme::default())
             .with_prompt(p)
             .interact_text()
+    }
+
+    pub fn fail(message: &str) -> fmt::Result {
+        let mut string = String::from("");
+        BasicTheme::default().format_error(&mut string, message)?;
+        println!("{string}");
+        Ok(())
     }
 
     #[inline]

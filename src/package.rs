@@ -101,7 +101,7 @@ impl FromStr for ParsedPackage {
                 check(s)?;
                 return Ok(ParsedPackage {name: s.to_string(), ..Default::default()});
             };
-            check(s)?;
+            check(p)?;
             Ok(ParsedPackage {
                 name: p.to_string(),
                 version: Some(v.to_string()),

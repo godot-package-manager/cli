@@ -1,6 +1,7 @@
 mod config_file;
 mod package;
 mod theme;
+mod verbosity;
 
 use crate::package::Package;
 use anyhow::Result;
@@ -9,6 +10,7 @@ use config_file::{ConfigFile, ConfigType};
 use console::{self, Term};
 use futures::stream::{self, StreamExt};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressIterator};
+use lazy_static::lazy_static;
 use package::ParsedPackage;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
@@ -16,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::thread;
 use std::{env::current_dir, panic, time::Instant};
+use verbosity::Verbosity;
 
 #[derive(Parser)]
 #[command(name = "gpm")]
@@ -45,10 +48,14 @@ struct Args {
     #[arg(long = "colors", default_value = "auto", global = true)]
     /// Control color output.
     colors: ColorChoice,
-
-    #[arg(long = "nv", global = true)]
-    /// Disable progress bars
-    not_verbose: bool,
+    #[arg(
+        long = "verbosity",
+        short = 'v',
+        global = true,
+        default_value = "normal"
+    )]
+    /// Verbosity level
+    verbosity: Verbosity,
 }
 
 #[derive(Subcommand)]
@@ -107,6 +114,9 @@ enum PrefixType {
 
 /// number of buffer slots
 const PARALLEL: usize = 5;
+lazy_static! {
+    static ref BEGIN: Instant = Instant::now();
+}
 
 #[tokio::main]
 async fn main() {
@@ -127,7 +137,7 @@ async fn main() {
     let args = Args::parse();
     fn set_colors(val: bool) {
         console::set_colors_enabled(val);
-        console::set_colors_enabled_stderr(val)
+        console::set_colors_enabled_stderr(val);
     }
     match args.colors {
         ColorChoice::Always => set_colors(true),
@@ -160,12 +170,12 @@ async fn main() {
         match args.action {
             Actions::Update => {
                 let c = &mut get_cfg(args.config_file).await;
-                update(c, true, args.not_verbose).await;
+                update(c, true, args.verbosity).await;
                 lock(c, args.lock_file);
             }
             Actions::Purge => {
                 let c = &mut get_cfg(args.config_file).await;
-                purge(c, args.not_verbose);
+                purge(c, args.verbosity);
                 lock(c, args.lock_file);
             }
             Actions::Tree {
@@ -198,23 +208,42 @@ async fn main() {
     .await;
 }
 
-async fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
+async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
     if !Path::new("./addons/").exists() {
         create_dir("./addons/").expect("Should be able to create addons folder");
     }
+    #[rustfmt::skip]
     let packages = cfg.collect();
+    if v.debug() {
+        println!(
+            "collecting {} packages took {}",
+            packages.len(),
+            HumanDuration(crate::BEGIN.elapsed())
+        );
+        print!("packages: [");
+        let mut first = true;
+        for p in &packages {
+            if first {
+                print!("{p}");
+            } else {
+                print!(", {p}");
+            }
+            first = false;
+        }
+        println!("]");
+    }
+
     if packages.is_empty() {
         panic!("No packages to update (modify the \"godot.package\" file to add packages)");
     }
     let bar;
     let p_count = packages.len() as u64;
-    if not_verbose {
-        bar = ProgressBar::hidden();
-    } else {
+    if v.bar() {
         bar = putils::bar(p_count);
         bar.set_prefix("Updating");
+    } else {
+        bar = ProgressBar::hidden();
     };
-    let now = Instant::now();
     let (tx, rx) = channel();
     enum Status {
         Processing(String),
@@ -244,7 +273,9 @@ async fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
                 }
                 Status::Finished(p) => {
                     running.swap_remove(running.iter().position(|e| e == &p).unwrap());
-                    bar.suspend(|| println!("{:>12} {p}", putils::green("Downloaded")));
+                    if v.info() {
+                        bar.suspend(|| println!("{:>12} {p}", putils::green("Downloaded")));
+                    }
                     bar.inc(1);
                 }
             }
@@ -255,13 +286,15 @@ async fn update(cfg: &mut ConfigFile, modify: bool, not_verbose: bool) {
     let _ = buf.collect::<Vec<()>>().await; // wait till its done
     drop(tx); // drop the transmitter to break the reciever loop
     handler.join().unwrap();
-    println!(
-        "{:>12} updated {} package{} in {}",
-        putils::green("Finished"),
-        HumanCount(p_count),
-        if p_count > 0 { "s" } else { "" },
-        HumanDuration(now.elapsed())
-    )
+    if v.info() {
+        println!(
+            "{:>12} updated {} package{} in {}",
+            putils::green("Finished"),
+            HumanCount(p_count),
+            if p_count > 0 { "s" } else { "" },
+            HumanDuration(crate::BEGIN.elapsed())
+        )
+    }
 }
 
 /// Recursively deletes empty directories.
@@ -287,7 +320,7 @@ fn recursive_delete_empty(dir: String) -> std::io::Result<()> {
     Ok(())
 }
 
-fn purge(cfg: &mut ConfigFile, not_verbose: bool) {
+fn purge(cfg: &mut ConfigFile, v: Verbosity) {
     let packages = cfg
         .collect()
         .into_iter()
@@ -302,11 +335,11 @@ fn purge(cfg: &mut ConfigFile, not_verbose: bool) {
     };
     let p_count = packages.len() as u64;
     let bar;
-    if not_verbose {
-        bar = ProgressBar::hidden();
-    } else {
+    if v.bar() {
         bar = putils::bar(p_count);
         bar.set_prefix("Purging");
+    } else {
+        bar = ProgressBar::hidden();
     }
     let now = Instant::now();
     packages
@@ -314,11 +347,13 @@ fn purge(cfg: &mut ConfigFile, not_verbose: bool) {
         .progress_with(bar.clone()) // the last steps
         .for_each(|p| {
             bar.set_message(format!("{p}"));
-            bar.println(format!(
-                "{:>12} {p} ({})",
-                putils::green("Deleting"),
-                p.download_dir(),
-            ));
+            if v.info() {
+                bar.println(format!(
+                    "{:>12} {p} ({})",
+                    putils::green("Deleting"),
+                    p.download_dir(),
+                ));
+            }
             p.purge()
         });
 
@@ -328,13 +363,15 @@ fn purge(cfg: &mut ConfigFile, not_verbose: bool) {
             eprintln!("Unable to remove empty directorys: {e}")
         }
     }
-    println!(
-        "{:>12} purge {} package{} in {}",
-        putils::green("Finished"),
-        HumanCount(p_count),
-        if p_count > 0 { "s" } else { "" },
-        HumanDuration(now.elapsed())
-    )
+    if v.info() {
+        println!(
+            "{:>12} purge {} package{} in {}",
+            putils::green("Finished"),
+            HumanCount(p_count),
+            if p_count > 0 { "s" } else { "" },
+            HumanDuration(now.elapsed())
+        )
+    }
 }
 
 fn tree(
@@ -484,7 +521,7 @@ async fn init(mut packages: Vec<Package>) -> Result<()> {
     if c.packages.len() > 0
         && putils::confirm("Would you like to install your new packages?", true)?
     {
-        update(&mut c, true, false).await;
+        update(&mut c, true, Verbosity::Normal).await;
     };
     println!("Goodbye!");
     Ok(())
@@ -527,9 +564,9 @@ async fn gpm() {
     let _t = test_utils::mktemp();
     let cfg_file =
         &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into()).await;
-    update(cfg_file, false, false).await;
+    update(cfg_file, false, Verbosity::Verbose).await;
     assert_eq!(test_utils::hashd("addons").join("|"), "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329|8e77e3adf577d32c8bc98981f05d40b2eb303271da08bfa7e205d3f27e188bd7|a625595a71b159e33b3d1ee6c13bea9fc4372be426dd067186fe2e614ce76e3c|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c850a9300388d6da1566c12a389927c3353bf931c4d6ea59b02beb302aac03ea|d060936e5f1e8b1f705066ade6d8c6de90435a91c51f122905a322251a181a5c|d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5|d794f3cee783779f50f37a53e1d46d9ebbc5ee7b37c36d7b6ee717773b6955cd|e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87");
-    purge(cfg_file, false);
+    purge(cfg_file, Verbosity::Verbose);
     assert_eq!(test_utils::hashd("addons"), vec![] as Vec<String>);
     assert_eq!(
         tree(

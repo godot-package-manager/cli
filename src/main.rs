@@ -5,6 +5,7 @@ mod verbosity;
 
 use crate::package::Package;
 use anyhow::Result;
+use async_recursion::async_recursion;
 use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
 use config_file::{ConfigFile, ConfigType};
 use console::{self, Term};
@@ -118,7 +119,7 @@ lazy_static! {
     static ref BEGIN: Instant = Instant::now();
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let _ = BEGIN.elapsed(); // needed to initialize the instant for whatever reason
     panic::set_hook(Box::new(|panic_info| {
@@ -159,8 +160,8 @@ async fn main() {
         };
         ConfigFile::new(&contents).await
     }
-    fn lock(cfg: &mut ConfigFile, path: PathBuf) {
-        let lockfile = cfg.lock();
+    async fn lock(cfg: &mut ConfigFile, path: PathBuf) {
+        let lockfile = cfg.lock().await;
         if path == Path::new("-") {
             println!("{lockfile}");
         } else {
@@ -172,12 +173,12 @@ async fn main() {
         Actions::Update => {
             let c = &mut get_cfg(args.config_file).await;
             update(c, true, args.verbosity).await;
-            lock(c, args.lock_file);
+            lock(c, args.lock_file).await;
         }
         Actions::Purge => {
             let c = &mut get_cfg(args.config_file).await;
             purge(c, args.verbosity);
-            lock(c, args.lock_file);
+            lock(c, args.lock_file).await;
         }
         Actions::Tree {
             charset,
@@ -191,6 +192,7 @@ async fn main() {
                 prefix,
                 print_tarballs
             )
+            .await
         ),
         Actions::Init { packages } => {
             let buf = stream::iter(packages.into_iter())
@@ -247,7 +249,6 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
         Processing(String),
         Finished(String),
     }
-
     let (tx, rx) = channel();
     let buf = stream::iter(packages)
         .map(|mut p| async {
@@ -376,7 +377,7 @@ fn purge(cfg: &mut ConfigFile, v: Verbosity) {
     }
 }
 
-fn tree(
+async fn tree(
     cfg: &mut ConfigFile,
     charset: CharSet,
     prefix: PrefixType,
@@ -404,10 +405,12 @@ fn tree(
         print_tarballs,
         0,
         &mut count,
-    );
+    )
+    .await;
     tree.push_str(format!("{} dependencies", HumanCount(count)).as_str());
 
-    fn iter(
+    #[async_recursion]
+    async fn iter(
         packages: &mut Vec<Package>,
         prefix: &str,
         tree: &mut String,
@@ -438,7 +441,7 @@ fn tree(
             );
             if print_tarballs {
                 tree.push(' ');
-                tree.push_str(p.manifest.tarball.as_str());
+                tree.push_str(p.get_manifest().await.unwrap().tarball.as_str());
             }
             tree.push('\n');
             if p.has_deps() {
@@ -457,7 +460,8 @@ fn tree(
                     print_tarballs,
                     depth + 1,
                     count,
-                );
+                )
+                .await;
             }
         }
     }
@@ -517,7 +521,10 @@ async fn init(mut packages: Vec<Package>) -> Result<()> {
         .print(types[putils::select(&types, "Language to save in:", 2)?]);
     write(path, c_text)?;
     if putils::confirm("Would you like to view the dependency tree?", true)? {
-        println!("{}", tree(&mut c, CharSet::UTF8, PrefixType::Indent, false));
+        println!(
+            "{}",
+            tree(&mut c, CharSet::UTF8, PrefixType::Indent, false).await
+        );
     };
 
     if c.packages.len() > 0
@@ -577,6 +584,7 @@ async fn gpm() {
             crate::PrefixType::Indent,
             false
         )
+        .await
         .lines()
         .skip(1)
         .collect::<Vec<&str>>()

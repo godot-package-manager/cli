@@ -18,7 +18,7 @@ pub struct ConfigFile {
 /// A wrapper to [ConfigFile]. This _is_ necessary.
 /// Any alternatives will end up being more ugly than this. (trust me i tried)
 /// There is no way to automatically deserialize the map into a vec.
-struct ConfigWrapper {
+struct ParsedConfig {
     // support NPM package.json files (also allows gpm -c package.json -u)
     #[serde(alias = "dependencies")]
     packages: HashMap<String, String>,
@@ -37,7 +37,7 @@ impl std::fmt::Display for ConfigType {
     }
 }
 
-impl From<ConfigFile> for ConfigWrapper {
+impl From<ConfigFile> for ParsedConfig {
     fn from(from: ConfigFile) -> Self {
         Self {
             packages: from
@@ -49,22 +49,28 @@ impl From<ConfigFile> for ConfigWrapper {
     }
 }
 
-impl ConfigFile {
-    async fn from(from: ConfigWrapper) -> Self {
-        let buf = stream::iter(from.packages.into_iter())
-            .map(|(name, version)| Package::new(name, version))
-            .buffer_unordered(crate::PARALLEL);
-        let packages = buf
-            .collect::<Vec<Result<Package>>>()
-            .await
-            .into_iter()
-            .map(|res| res.unwrap())
-            .collect();
-        Self { packages }
+impl ParsedConfig {
+    pub fn parse(txt: &str, t: ConfigType) -> Result<Self> {
+        Ok(match t {
+            ConfigType::TOML => toml::from_str::<ParsedConfig>(txt)?,
+            ConfigType::JSON => deser_hjson::from_str::<ParsedConfig>(txt)?,
+            ConfigType::YAML => serde_yaml::from_str::<ParsedConfig>(txt)?,
+        })
     }
 
+    pub async fn into_configfile(self) -> ConfigFile {
+        let packages = stream::iter(self.packages.into_iter())
+            .map(|(name, version)| async { Package::new(name, version).await.unwrap() })
+            .buffer_unordered(crate::PARALLEL)
+            .collect::<Vec<Package>>()
+            .await;
+        ConfigFile { packages }
+    }
+}
+
+impl ConfigFile {
     pub fn print(self, t: ConfigType) -> String {
-        let w = ConfigWrapper::from(self);
+        let w = ParsedConfig::from(self);
         match t {
             ConfigType::JSON => serde_json::to_string_pretty(&w).unwrap(),
             ConfigType::YAML => serde_yaml::to_string(&w).unwrap(),
@@ -113,22 +119,20 @@ impl ConfigFile {
     }
 
     pub async fn parse(txt: &String, t: ConfigType) -> Result<Self> {
-        type W = ConfigWrapper;
-        Ok(match t {
-            ConfigType::TOML => Self::from(toml::from_str::<W>(txt)?).await,
-            ConfigType::JSON => Self::from(deser_hjson::from_str::<W>(txt)?).await,
-            ConfigType::YAML => Self::from(serde_yaml::from_str::<W>(txt)?).await,
-        })
+        Ok(ParsedConfig::parse(txt, t)?.into_configfile().await)
     }
 
     /// Creates a lockfile for this config file.
     /// note: Lockfiles are currently unused.
-    pub fn lock(&mut self) -> String {
+    pub async fn lock(&mut self) -> String {
         let mut pkgs = vec![];
-        self.collect()
-            .into_iter()
-            .filter(|p| p.is_installed())
-            .for_each(|p| pkgs.push(p));
+        for mut p in self.collect() {
+            if p.is_installed() {
+                if let Ok(_) = p.get_manifest().await {
+                    pkgs.push(p)
+                };
+            }
+        }
         serde_json::to_string_pretty(&pkgs).unwrap()
     }
 
@@ -192,7 +196,7 @@ mod tests {
                 p.download().await
             }
             assert_eq!(
-                serde_json::from_str::<Vec<LockFileEntry>>(cfg.lock().as_str()).unwrap(),
+                serde_json::from_str::<Vec<LockFileEntry>>(cfg.lock().await.as_str()).unwrap(),
                 wanted_lockfile
             );
         }

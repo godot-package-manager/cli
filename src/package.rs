@@ -29,7 +29,7 @@ pub struct Package {
     #[serde(skip)]
     pub indirect: bool,
     #[serde(flatten)]
-    pub manifest: Manifest,
+    pub manifest: Option<Manifest>,
 }
 #[derive(Default, Clone, Debug)]
 pub struct ParsedPackage {
@@ -150,7 +150,6 @@ impl Package {
         p.name = name;
         p.version = version;
         p.get_deps().await?;
-        p.get_manifest().await?;
         Ok(p)
     }
 
@@ -212,7 +211,7 @@ impl Package {
     /// depending on wether this package is a direct dependency or not.
     pub async fn download(&mut self) {
         self.purge();
-        let bytes = reqwest::get(&self.manifest.tarball)
+        let bytes = reqwest::get(&self.get_manifest().await.unwrap().tarball)
             .await
             .expect("Tarball download should work")
             .bytes()
@@ -224,7 +223,7 @@ impl Package {
         hasher.update(&bytes);
         const ERR: &str = "Tarball shasum should be a valid hex string";
         assert_eq!(
-            self.manifest.shasum,
+            self.get_manifest().await.unwrap().shasum,
             format!("{:x}", hasher.finalize()),
             "Tarball did not match checksum!"
         );
@@ -311,7 +310,10 @@ impl Package {
     }
 
     /// Gets the package manifest and puts it in `self.manfiest`.
-    async fn get_manifest(&mut self) -> Result<()> {
+    pub async fn get_manifest(&mut self) -> Result<&Manifest> {
+        if !self.manifest.is_none() {
+            return Ok(self.manifest.as_ref().unwrap());
+        }
         let resp = reqwest::get(&format!("{REGISTRY}/{}/{}", self.name, self.version))
             .await?
             .text()
@@ -333,10 +335,11 @@ impl Package {
         struct W {
             dist: Manifest,
         }
-        self.manifest = serde_json::from_str::<W>(resp.as_str())
+        let manifest = serde_json::from_str::<W>(resp.as_str())
             .expect(format!("Unable to get manifest for package {}", self).as_str())
             .dist;
-        Ok(())
+        self.manifest = Some(manifest);
+        return Ok(self.manifest.as_ref().unwrap());
     }
 
     /// Returns the download directory for this package depending on wether it is indirect or not.

@@ -17,6 +17,7 @@ use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::{env::current_dir, panic, time::Instant};
 use verbosity::Verbosity;
@@ -249,47 +250,69 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
         Processing(String),
         Finished(String),
     }
-    let (tx, rx) = channel();
+    let tx: Option<Sender<Status>>;
+    let rx: Option<Receiver<Status>>;
+    let bar_or_info = v.bar() || v.info();
+    if bar_or_info {
+        let (t, r) = channel();
+        tx = Some(t);
+        rx = Some(r);
+    } else {
+        tx = None;
+        rx = None;
+    };
     let buf = stream::iter(packages)
         .map(|mut p| async {
             let p_name = p.to_string();
-            let tx = tx.clone();
+            let tx = if bar_or_info { tx.clone() } else { None };
             async move {
-                tx.send(Status::Processing(p_name.clone())).unwrap();
+                if bar_or_info {
+                    tx.as_ref()
+                        .unwrap()
+                        .send(Status::Processing(p_name.clone()))
+                        .unwrap();
+                }
                 p.download().await;
                 if modify {
                     p.modify().unwrap();
                 };
-                tx.send(Status::Finished(p_name.clone())).unwrap();
+                if bar_or_info {
+                    tx.unwrap().send(Status::Finished(p_name.clone())).unwrap();
+                }
             }
             .await;
         })
         .buffer_unordered(PARALLEL);
     // use to test the difference in speed
     // for mut p in packages { p.download(client.clone()).await; if modify { p.modify().unwrap(); }; bar.inc(1); }
-    let handler = thread::spawn(move || {
-        let mut running = vec![];
-        while let Ok(status) = rx.recv() {
-            match status {
-                Status::Processing(p) => {
-                    running.push(p);
-                }
-                Status::Finished(p) => {
-                    running.swap_remove(running.iter().position(|e| e == &p).unwrap());
-                    if v.info() {
-                        bar.suspend(|| println!("{:>12} {p}", putils::green("Downloaded")));
+    let handler = if bar_or_info {
+        Some(thread::spawn(move || {
+            let mut running = vec![];
+            let rx = rx.unwrap();
+            while let Ok(status) = rx.recv() {
+                match status {
+                    Status::Processing(p) => {
+                        running.push(p);
                     }
-                    bar.inc(1);
+                    Status::Finished(p) => {
+                        running.swap_remove(running.iter().position(|e| e == &p).unwrap());
+                        if v.info() {
+                            bar.suspend(|| println!("{:>12} {p}", putils::green("Downloaded")));
+                        }
+                        bar.inc(1);
+                    }
                 }
+                bar.set_message(running.join(", "));
             }
-            bar.set_message(running.join(", "));
-        }
-        bar.finish_and_clear();
-    });
+            bar.finish_and_clear();
+        }))
+    } else {
+        None
+    };
     buf.for_each(|_| async {}).await; // wait till its done
     drop(tx); // drop the transmitter to break the reciever loop
-    handler.join().unwrap();
-    if v.info() {
+    if bar_or_info {
+        handler.unwrap().join().unwrap();
         println!(
             "{:>12} updated {} package{} in {}",
             putils::green("Finished"),

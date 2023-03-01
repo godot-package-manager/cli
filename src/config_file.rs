@@ -161,6 +161,8 @@ impl ConfigFile {
 
 #[cfg(test)]
 mod tests {
+    use reqwest::Client;
+
     use crate::config_file::*;
 
     #[tokio::test]
@@ -189,7 +191,7 @@ mod tests {
                 "@bendn/gdcli@1.2.5"
             );
             for mut p in cfg.collect() {
-                p.download().await
+                p.download(Client::new()).await
             }
             assert_eq!(
                 serde_json::from_str::<Vec<LockFileEntry>>(cfg.lock().as_str()).unwrap(),

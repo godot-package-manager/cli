@@ -114,13 +114,14 @@ enum PrefixType {
 }
 
 /// number of buffer slots
-const PARALLEL: usize = 5;
+const PARALLEL: usize = 6;
 lazy_static! {
     static ref BEGIN: Instant = Instant::now();
 }
 
 #[tokio::main]
 async fn main() {
+    let _ = BEGIN.elapsed(); // needed to initialize the instant for whatever reason
     panic::set_hook(Box::new(|panic_info| {
         eprint!("{:>12} ", putils::err());
         if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
@@ -167,46 +168,44 @@ async fn main() {
             write(path, lockfile).expect("Writing lock file should be ok");
         }
     }
-    async {
-        match args.action {
-            Actions::Update => {
-                let c = &mut get_cfg(args.config_file).await;
-                update(c, true, args.verbosity).await;
-                lock(c, args.lock_file);
-            }
-            Actions::Purge => {
-                let c = &mut get_cfg(args.config_file).await;
-                purge(c, args.verbosity);
-                lock(c, args.lock_file);
-            }
-            Actions::Tree {
+
+    match args.action {
+        Actions::Update => {
+            let c = &mut get_cfg(args.config_file).await;
+            update(c, true, args.verbosity).await;
+            lock(c, args.lock_file);
+        }
+        Actions::Purge => {
+            let c = &mut get_cfg(args.config_file).await;
+            purge(c, args.verbosity);
+            lock(c, args.lock_file);
+        }
+        Actions::Tree {
+            charset,
+            prefix,
+            print_tarballs,
+        } => println!(
+            "{}",
+            tree(
+                &mut get_cfg(args.config_file).await, // no locking needed
                 charset,
                 prefix,
-                print_tarballs,
-            } => print!(
-                "{}",
-                tree(
-                    &mut get_cfg(args.config_file).await, // no locking needed
-                    charset,
-                    prefix,
-                    print_tarballs
-                )
-            ),
-            Actions::Init { packages } => {
-                let buf = stream::iter(packages.into_iter())
-                    .map(|pp| async move {
-                        let name = pp.to_string();
-                        pp.into_package()
-                            .await
-                            .expect(format!("Package {name} could not be parsed").as_str())
-                    })
-                    .buffer_unordered(4);
-                let packages = buf.collect::<Vec<Package>>().await;
-                init(packages).await.expect("Initializing cfg should be ok");
-            }
+                print_tarballs
+            )
+        ),
+        Actions::Init { packages } => {
+            let buf = stream::iter(packages.into_iter())
+                .map(|pp| async move {
+                    let name = pp.to_string();
+                    pp.into_package()
+                        .await
+                        .expect(format!("Package {name} could not be parsed").as_str())
+                })
+                .buffer_unordered(4);
+            let packages = buf.collect::<Vec<Package>>().await;
+            init(packages).await.expect("Initializing cfg should be ok");
         }
     }
-    .await;
 }
 
 async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
@@ -245,27 +244,31 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
     } else {
         bar = ProgressBar::hidden();
     };
-    let (tx, rx) = channel();
     enum Status {
         Processing(String),
         Finished(String),
     }
 
+    let (tx, rx) = channel();
     let client = Client::new();
     let buf = stream::iter(packages)
         .map(|mut p| async {
             let p_name = p.to_string();
-            tx.send(Status::Processing(p_name.clone())).unwrap();
+            let tx = tx.clone();
             let client = client.clone();
-            tokio::spawn(async move {
+            async move {
+                tx.send(Status::Processing(p_name.clone())).unwrap();
                 p.download(client).await;
                 if modify {
                     p.modify().unwrap();
                 };
-            });
-            tx.send(Status::Finished(p_name.clone())).unwrap();
+                tx.send(Status::Finished(p_name.clone())).unwrap();
+            }
+            .await;
         })
         .buffer_unordered(PARALLEL);
+    // use to test the difference in speed
+    // for mut p in packages { p.download(client.clone()).await; if modify { p.modify().unwrap(); }; bar.inc(1); }
     let handler = thread::spawn(move || {
         let mut running = vec![];
         while let Ok(status) = rx.recv() {
@@ -285,7 +288,7 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
         }
         bar.finish_and_clear();
     });
-    let _ = buf.collect::<Vec<()>>().await; // wait till its done
+    buf.for_each(|_| async {}).await; // wait till its done
     drop(tx); // drop the transmitter to break the reciever loop
     handler.join().unwrap();
     if v.info() {

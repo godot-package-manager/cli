@@ -12,7 +12,6 @@ use futures::stream::{self, StreamExt};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressIterator};
 use lazy_static::lazy_static;
 use package::ParsedPackage;
-use reqwest::Client;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
@@ -250,15 +249,13 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
     }
 
     let (tx, rx) = channel();
-    let client = Client::new();
     let buf = stream::iter(packages)
         .map(|mut p| async {
             let p_name = p.to_string();
             let tx = tx.clone();
-            let client = client.clone();
             async move {
                 tx.send(Status::Processing(p_name.clone())).unwrap();
-                p.download(client).await;
+                p.download().await;
                 if modify {
                     p.modify().unwrap();
                 };

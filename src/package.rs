@@ -3,7 +3,6 @@ use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
 use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JValue;
 use sha1::{Digest, Sha1};
@@ -211,11 +210,9 @@ impl Package {
 
     /// Installs this [Package] to a download directory,
     /// depending on wether this package is a direct dependency or not.
-    pub async fn download(&mut self, client: Client) {
+    pub async fn download(&mut self) {
         self.purge();
-        let bytes = client
-            .get(&self.manifest.tarball)
-            .send()
+        let bytes = reqwest::get(&self.manifest.tarball)
             .await
             .expect("Tarball download should work")
             .bytes()
@@ -557,7 +554,7 @@ mod tests {
     async fn download() {
         let _t = crate::test_utils::mktemp();
         let mut p = Package::from_str("@bendn/test:2.0.10").await.unwrap();
-        p.download(Client::new()).await;
+        p.download().await;
         assert_eq!(
             crate::test_utils::hashd(p.download_dir().as_str()),
             [
@@ -601,7 +598,7 @@ mod tests {
             .unwrap();
         let dep_map = &p.dep_map();
         let cwd = &Path::new("addons/@bendn/test").into(); // holy shit rust is smart -- it knows this needs to be a pathbuf
-        p.download(Client::new()).await;
+        p.download().await;
         p.indirect = false;
         assert_eq!(
             p.modify_load(Path::new("addons/test/main.gd"), cwd, dep_map)

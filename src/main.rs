@@ -220,7 +220,7 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
         println!(
             "collecting {} packages took {}",
             packages.len(),
-            HumanDuration(crate::BEGIN.elapsed())
+            HumanDuration(BEGIN.elapsed())
         );
         print!("packages: [");
         let mut first = true;
@@ -318,7 +318,7 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
             putils::green("Finished"),
             HumanCount(p_count),
             if p_count > 0 { "s" } else { "" },
-            HumanDuration(crate::BEGIN.elapsed())
+            HumanDuration(BEGIN.elapsed())
         )
     }
 }

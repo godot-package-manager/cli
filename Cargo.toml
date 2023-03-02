@@ -34,3 +34,7 @@ futures = "0.3"
 glob = "0.3.0"
 sha2 = "0.10.6"
 tempdir = "0.3.7"
+
+[profile.release]
+lto = true
+strip = true

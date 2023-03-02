@@ -135,7 +135,7 @@ async fn main() {
         if let Some(s) = panic_info.location() {
             eprint!(" (@{}:{})", s.file(), s.line())
         }
-        eprintln!("");
+        eprintln!();
     }));
     let args = Args::parse();
     fn set_colors(val: bool) {
@@ -201,7 +201,7 @@ async fn main() {
                     let name = pp.to_string();
                     pp.into_package()
                         .await
-                        .expect(format!("Package {name} could not be parsed").as_str())
+                        .unwrap_or_else(|_| panic!("Package {name} could not be parsed"))
                 })
                 .buffer_unordered(4);
             let packages = buf.collect::<Vec<Package>>().await;
@@ -458,7 +458,7 @@ async fn tree(
                         format!("{prefix}{} {name}", if index != 0 { t } else { l })
                     }
                     PrefixType::Depth => format!("{depth} {name}"),
-                    PrefixType::None => format!("{name}"),
+                    PrefixType::None => name.to_string(),
                 }
                 .as_str(),
             );
@@ -497,9 +497,9 @@ async fn init(mut packages: Vec<Package>) -> Result<()> {
         let mut has_asked = false;
         let mut just_failed = false;
         while {
-            if just_failed == true {
+            if just_failed {
                 putils::confirm("Try again?", true)?
-            } else if has_asked == false {
+            } else if !has_asked {
                 putils::confirm("Add a package?", true)?
             } else {
                 putils::confirm("Add another package?", true)?
@@ -550,7 +550,7 @@ async fn init(mut packages: Vec<Package>) -> Result<()> {
         );
     };
 
-    if c.packages.len() > 0
+    if !c.packages.is_empty()
         && putils::confirm("Would you like to install your new packages?", true)?
     {
         update(&mut c, true, Verbosity::Normal).await;
@@ -628,12 +628,12 @@ pub mod putils {
     use std::str::FromStr;
 
     #[inline]
-    pub fn err() -> StyledObject<String> {
-        style(format!("Error")).red().bold()
+    pub fn err() -> StyledObject<&'static str> {
+        style("Error").red().bold()
     }
 
     #[inline]
-    pub fn select<T: ToString>(items: &Vec<T>, p: &str, default: usize) -> Result<usize> {
+    pub fn select<T: ToString>(items: &[T], p: &str, default: usize) -> Result<usize> {
         Select::with_theme(&BasicTheme::default())
             .items(items)
             .with_prompt(p)
@@ -643,10 +643,10 @@ pub mod putils {
 
     #[inline]
     pub fn confirm(p: &str, default: bool) -> Result<bool> {
-        Ok(Confirm::with_theme(&BasicTheme::default())
+        Confirm::with_theme(&BasicTheme::default())
             .with_prompt(p)
             .default(default)
-            .interact()?)
+            .interact()
     }
 
     #[inline]
@@ -680,8 +680,8 @@ pub mod putils {
     }
 
     #[inline]
-    pub fn warn() -> StyledObject<String> {
-        style(format!("Warn")).yellow().bold()
+    pub fn warn() -> StyledObject<&'static str> {
+        style("Warn").yellow().bold()
     }
 
     #[inline]

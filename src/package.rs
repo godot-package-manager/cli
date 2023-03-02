@@ -52,22 +52,19 @@ impl ParsedPackage {
         if self.version.is_some() {
             Package::new(self.name, self.version.unwrap()).await
         } else {
-            Package::new_nover(self.name).await
+            Package::new_no_version(self.name).await
         }
-    }
-
-    pub fn to_string(&self) -> String {
-        format!(
-            "{}@{}",
-            self.name,
-            self.version.as_ref().unwrap_or(&"latest".to_string())
-        )
     }
 }
 
 impl fmt::Display for ParsedPackage {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(
+            f,
+            "{}@{}",
+            self.name,
+            self.version.as_ref().unwrap_or(&"latest".to_string())
+        )
     }
 }
 
@@ -118,8 +115,7 @@ impl FromStr for ParsedPackage {
             if s.as_bytes()[0] == b'@' {
                 let mut owned_s = s.to_string();
                 owned_s.remove(0);
-                let Some((p, v)) = owned_s
-                .split_once('@') else {
+                let Some((p, v)) = owned_s.split_once('@') else {
                     check(s)?;
                     return Ok(ParsedPackage {name: s.to_string(), ..Default::default()});
                 };
@@ -146,21 +142,23 @@ impl Package {
     /// try to access the fs, and if it fails, it will make
     /// calls to cdn.jsdelivr.net to get the `package.json` file.
     pub async fn new(name: String, version: String) -> Result<Package> {
-        let mut p = Package::default();
-        p.name = name;
-        p.version = version;
+        let mut p = Package {
+            name,
+            version,
+            ..Default::default()
+        };
         p.get_deps().await?;
         Ok(p)
     }
 
     /// Create a package from a [str]. see also [ParsedPackage].
     #[allow(dead_code)] // used for tests
-    pub async fn from_str(s: &str) -> Result<Package> {
+    pub async fn create_from_str(s: &str) -> Result<Package> {
         ParsedPackage::from_str(s).unwrap().into_package().await
     }
 
-    /// Creates a new [Package] from a name, gets the version with get_latest_version()
-    pub async fn new_nover(name: String) -> Result<Package> {
+    /// Creates a new [Package] from a name, gets the latest version from registry/name.
+    pub async fn new_no_version(name: String) -> Result<Package> {
         let resp = reqwest::get(&format!("{REGISTRY}/{name}"))
             .await?
             .text()
@@ -188,11 +186,6 @@ impl Package {
         .expect("Manifest");
         p.get_deps().await?;
         Ok(p)
-    }
-
-    /// Stringifies this [Package], format my_p@1.0.0.
-    pub fn to_string(&self) -> String {
-        format!("{}@{}", self.name, self.version)
     }
 
     /// Returns wether this package is installed.
@@ -234,7 +227,7 @@ impl Package {
             R: io::Read,
         {
             if dst.symlink_metadata().is_err() {
-                create_dir_all(&dst)?;
+                create_dir_all(dst)?;
             }
 
             let dst = &dst.canonicalize().unwrap_or(dst.to_path_buf());
@@ -311,7 +304,7 @@ impl Package {
 
     /// Gets the package manifest and puts it in `self.manfiest`.
     pub async fn get_manifest(&mut self) -> Result<&Manifest> {
-        if !self.manifest.is_none() {
+        if self.manifest.is_some() {
             return Ok(self.manifest.as_ref().unwrap());
         }
         let resp = reqwest::get(&format!("{REGISTRY}/{}/{}", self.name, self.version))
@@ -336,7 +329,7 @@ impl Package {
             dist: Manifest,
         }
         let manifest = serde_json::from_str::<W>(resp.as_str())
-            .expect(format!("Unable to get manifest for package {}", self).as_str())
+            .unwrap_or_else(|_| panic!("Unable to get manifest for package {self}"))
             .dist;
         self.manifest = Some(manifest);
         return Ok(self.manifest.as_ref().unwrap());
@@ -387,15 +380,15 @@ impl Package {
     /// ```
     fn modify_script_loads(
         &self,
-        t: &String,
-        cwd: &PathBuf,
+        t: &str,
+        cwd: &Path,
         dep_map: &HashMap<String, String>,
     ) -> String {
         lazy_static::lazy_static! {
             static ref SCRIPT_LOAD_R: Regex = Regex::new("(pre)?load\\([\"']([^)]+)['\"]\\)").unwrap();
         }
         SCRIPT_LOAD_R
-            .replace_all(&t, |c: &Captures| {
+            .replace_all(t, |c: &Captures| {
                 let p = Path::new(c.get(2).unwrap().as_str());
                 let res = self.modify_load(p.strip_prefix("res://").unwrap_or(p), cwd, dep_map);
                 let preloaded = if c.get(1).is_some() { "pre" } else { "" };
@@ -423,14 +416,14 @@ impl Package {
     fn modify_tres_loads(
         &self,
         t: &String,
-        cwd: &PathBuf,
+        cwd: &Path,
         dep_map: &HashMap<String, String>,
     ) -> String {
         lazy_static::lazy_static! {
-            static ref TRES_LOAD_R: Regex = Regex::new("[ext_resource path=\"([^\"]+)\"").unwrap();
+            static ref TRES_LOAD_R: Regex = Regex::new(r#"\[ext_resource path="([^"]+)""#).unwrap();
         }
         TRES_LOAD_R
-            .replace_all(&t, |c: &Captures| {
+            .replace_all(t, |c: &Captures| {
                 let p = Path::new(c.get(1).unwrap().as_str());
                 let res = self.modify_load(
                     p.strip_prefix("res://")
@@ -448,12 +441,7 @@ impl Package {
     }
 
     /// The backend for modify_script_loads and modify_tres_loads.
-    fn modify_load(
-        &self,
-        path: &Path,
-        cwd: &PathBuf,
-        dep_map: &HashMap<String, String>,
-    ) -> PathBuf {
+    fn modify_load(&self, path: &Path, cwd: &Path, dep_map: &HashMap<String, String>) -> PathBuf {
         // if it works, skip it
         if path.exists() || cwd.join(path).exists() {
             return path.to_path_buf();
@@ -469,20 +457,15 @@ impl Package {
             "{:>12} Could not find path for {path:#?}",
             crate::putils::warn()
         );
-        return path.to_path_buf();
+        path.to_path_buf()
     }
 
     /// Recursively modifies a directory.
-    fn recursive_modify(
-        &self,
-        dir: PathBuf,
-        deps: &Vec<Package>,
-        dep_map: &HashMap<String, String>,
-    ) -> io::Result<()> {
+    fn recursive_modify(&self, dir: PathBuf, dep_map: &HashMap<String, String>) -> io::Result<()> {
         for entry in read_dir(&dir)? {
             let p = entry?;
             if p.path().is_dir() {
-                self.recursive_modify(p.path(), deps, dep_map)?;
+                self.recursive_modify(p.path(), dep_map)?;
                 continue;
             }
 
@@ -518,7 +501,7 @@ impl Package {
             let d = p.download_dir().strip_prefix("./").unwrap().to_string();
             dep_map.insert(p.name.clone(), d.clone());
             // unscoped (@ben/cli => cli) (for compat)
-            if let Some((_, s)) = p.name.split_once("/") {
+            if let Some((_, s)) = p.name.split_once('/') {
                 dep_map.insert(s.into(), d);
             }
         }
@@ -531,21 +514,21 @@ impl Package {
 
     /// The catalyst for `recursive_modify`.
     pub fn modify(&self) -> io::Result<()> {
-        if self.is_installed() == false {
+        if !self.is_installed() {
             panic!("Attempting to modify a package that is not installed");
         }
 
         self.recursive_modify(
             Path::new(&self.download_dir()).to_path_buf(),
-            &self.dependencies,
             &self.dep_map(),
         )
     }
 }
 
 impl fmt::Display for Package {
+    /// Stringifies this [Package], format my_p@1.0.0.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "{}@{}", self.name, self.version)
     }
 }
 
@@ -556,7 +539,9 @@ mod tests {
     #[tokio::test]
     async fn download() {
         let _t = crate::test_utils::mktemp();
-        let mut p = Package::from_str("@bendn/test:2.0.10").await.unwrap();
+        let mut p = Package::create_from_str("@bendn/test:2.0.10")
+            .await
+            .unwrap();
         p.download().await;
         assert_eq!(
             crate::test_utils::hashd(p.download_dir().as_str()),
@@ -574,7 +559,7 @@ mod tests {
     async fn dep_map() {
         // no fs was touched in the making of this test
         assert_eq!(
-            Package::from_str("@bendn/test@2.0.10")
+            Package::create_from_str("@bendn/test@2.0.10")
                 .await
                 .unwrap()
                 .dep_map(),
@@ -596,11 +581,11 @@ mod tests {
     #[tokio::test]
     async fn modify_load() {
         let _t = crate::test_utils::mktemp();
-        let mut p = Package::from_str("@bendn/test=2.0.10".into())
+        let mut p = Package::create_from_str("@bendn/test=2.0.10")
             .await
             .unwrap();
         let dep_map = &p.dep_map();
-        let cwd = &Path::new("addons/@bendn/test").into(); // holy shit rust is smart -- it knows this needs to be a pathbuf
+        let cwd = Path::new("addons/@bendn/test").into();
         p.download().await;
         p.indirect = false;
         assert_eq!(

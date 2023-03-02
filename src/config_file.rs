@@ -81,7 +81,7 @@ impl ConfigFile {
     /// Creates a new [ConfigFile] from the given text
     /// Panics if the file cant be parsed as toml, hjson or yaml.
     pub async fn new(contents: &String) -> Self {
-        if contents.len() == 0 {
+        if contents.is_empty() {
             panic!("Empty CFG");
         }
 
@@ -97,7 +97,7 @@ impl ConfigFile {
                 .expect("Parsing CFG from YAML should work")
         } else {
             for i in [ConfigType::JSON, ConfigType::YAML, ConfigType::TOML].into_iter() {
-                let res = Self::parse(contents, i.clone()).await;
+                let res = Self::parse(contents, i).await;
 
                 // im sure theres some kind of idiomatic rust way to do this that i dont know of
                 if res.is_ok() {
@@ -118,7 +118,7 @@ impl ConfigFile {
         cfg
     }
 
-    pub async fn parse(txt: &String, t: ConfigType) -> Result<Self> {
+    pub async fn parse(txt: &str, t: ConfigType) -> Result<Self> {
         Ok(ParsedConfig::parse(txt, t)?.into_configfile().await)
     }
 
@@ -127,11 +127,9 @@ impl ConfigFile {
     pub async fn lock(&mut self) -> String {
         let mut pkgs = vec![];
         for mut p in self.collect() {
-            if p.is_installed() {
-                if let Ok(_) = p.get_manifest().await {
-                    pkgs.push(p)
-                };
-            }
+            if p.is_installed() && p.get_manifest().await.is_ok() {
+                pkgs.push(p)
+            };
         }
         serde_json::to_string_pretty(&pkgs).unwrap()
     }

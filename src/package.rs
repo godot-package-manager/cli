@@ -324,13 +324,14 @@ impl Package {
                 self.version
             ));
         }
-        #[derive(Deserialize)]
-        struct W {
-            dist: Manifest,
-        }
-        let manifest = serde_json::from_str::<W>(resp.as_str())
-            .unwrap_or_else(|_| panic!("Unable to get manifest for package {self}"))
-            .dist;
+        let manifest = serde_json::from_str(
+            &serde_json::from_str::<JValue>(resp.as_str())
+                .unwrap()
+                .get("dist")
+                .unwrap()
+                .to_string(),
+        )
+        .unwrap_or_else(|_| panic!("Unable to get manifest for package {self}"));
         self.manifest = Some(manifest);
         return Ok(self.manifest.as_ref().unwrap());
     }

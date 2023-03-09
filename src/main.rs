@@ -17,7 +17,6 @@ use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
-use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::{env::current_dir, panic, time::Instant};
 use verbosity::Verbosity;
@@ -250,17 +249,8 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
         Processing(String),
         Finished(String),
     }
-    let tx: Option<Sender<Status>>;
-    let rx: Option<Receiver<Status>>;
     let bar_or_info = v.bar() || v.info();
-    if bar_or_info {
-        let (t, r) = channel();
-        tx = Some(t);
-        rx = Some(r);
-    } else {
-        tx = None;
-        rx = None;
-    };
+    let (tx, rx) = bar_or_info.then(|| channel()).unzip();
     let buf = stream::iter(packages)
         .map(|mut p| async {
             let p_name = p.to_string();

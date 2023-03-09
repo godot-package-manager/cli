@@ -121,7 +121,6 @@ lazy_static! {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let _ = BEGIN.elapsed(); // needed to initialize the instant for whatever reason
     panic::set_hook(Box::new(|panic_info| {
         eprint!("{:>12} ", putils::err());
         if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
@@ -168,7 +167,7 @@ async fn main() {
             write(path, lockfile).expect("Writing lock file should be ok");
         }
     }
-
+    let _ = BEGIN.elapsed(); // needed to initialize the instant for whatever reason
     match args.action {
         Actions::Update => {
             let c = &mut get_cfg(args.config_file).await;

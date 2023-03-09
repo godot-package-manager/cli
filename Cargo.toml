@@ -1,6 +1,6 @@
 [package]
 name = "godot-package-manager"
-version = "1.1.2"
+version = "1.2.0"
 edition = "2021"
 authors = ["bendn <bend.n@outlook.com>"]
 description = "A package manager for godot"
@@ -15,7 +15,6 @@ deser-hjson = "1.0.2"
 flate2 = "1.0.25"
 lazy_static = "1.4.0"
 regex = "1.7.0"
-ureq = "2.5.0"
 serde = { version = "1.0.150", features = ["derive"] }
 serde_json = "1.0.89"
 serde_yaml = "0.9.14"
@@ -26,9 +25,16 @@ console = "0.15.4"
 indicatif = "0.17.2"
 anyhow = "1.0.68"
 dialoguer = { version = "0.10.3", features = [] }
-rayon = "1.6"
+reqwest = { version = "0.11", features = [] }
+tokio = { version = "1", features = ["full"] }
+async-recursion = "1.0.2"
+futures = "0.3"
 
 [dev-dependencies]
 glob = "0.3.0"
 sha2 = "0.10.6"
 tempdir = "0.3.7"
+
+[profile.release]
+lto = true
+strip = true

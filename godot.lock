@@ -1,27 +1,14 @@
 [
   {
-    "name": "@bendn/splitter",
-    "version": "1.0.6",
-    "integrity": "sha512-HT7q5qv6OEpX95e5r+kAsasoAvH0Mgf+aT4SdKQ18fyDIn1dW02WqbulF0AMwHufgRZkMf9SnQGiAq79P5ZIKQ=="
-  },
-  {
     "name": "@bendn/test",
-    "version": "2.0.10",
-    "integrity": "sha512-hyPGxDG8poa2ekmWr1BeTCUa7YaZYfhsN7jcLJ3q2cQVlowcTnzqmz4iV3t21QFyabE5R+rV+y6d5dAItrJeDw=="
+    "integrity": "sha512-hyPGxDG8poa2ekmWr1BeTCUa7YaZYfhsN7jcLJ3q2cQVlowcTnzqmz4iV3t21QFyabE5R+rV+y6d5dAItrJeDw==",
+    "tarball": "https://registry.npmjs.org/@bendn/test/-/test-2.0.10.tgz",
+    "version": "2.0.10"
   },
   {
     "name": "@bendn/gdcli",
-    "version": "1.2.5",
-    "integrity": "sha512-/YOAd1+K4JlKvPTmpX8B7VWxGtFrxKq4R0A6u5qOaaVPK6uGsl4dGZaIHpxuqcurEcwPEOabkoShXKZaOXB0lw=="
-  },
-  {
-    "name": "prettier",
-    "version": "2.8.4",
-    "integrity": "sha512-vIS4Rlc2FNh0BySk3Wkd6xmwxB0FpOndW5fisM5H8hsZSxU2VWVB5CWIkIjWvrHjIhxk2g3bfMKM87zNTrZddw=="
-  },
-  {
-    "name": "stockfish",
-    "version": "15.0.0",
-    "integrity": "sha512-ze3vTgMrnCmMdtC8qpONBdXkSHWwv4Dx+GFV1V5TIi0qP1HF+Vwa4lArgqvHDooU8Mwfs1cgRzkW3SM8x/7TJg=="
+    "integrity": "sha512-/YOAd1+K4JlKvPTmpX8B7VWxGtFrxKq4R0A6u5qOaaVPK6uGsl4dGZaIHpxuqcurEcwPEOabkoShXKZaOXB0lw==",
+    "tarball": "https://registry.npmjs.org/@bendn/gdcli/-/gdcli-1.2.5.tgz",
+    "version": "1.2.5"
   }
 ]

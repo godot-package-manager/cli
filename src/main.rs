@@ -3,7 +3,7 @@ mod package;
 mod theme;
 mod verbosity;
 
-use crate::package::Package;
+use crate::package::{parsing::IntoPackageList, Package};
 use anyhow::Result;
 use async_recursion::async_recursion;
 use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
@@ -12,7 +12,8 @@ use console::{self, Term};
 use futures::stream::{self, StreamExt};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressIterator};
 use lazy_static::lazy_static;
-use package::ParsedPackage;
+use package::parsing::ParsedPackage;
+use reqwest::Client;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
@@ -145,7 +146,7 @@ async fn main() {
         ColorChoice::Never => set_colors(false),
         ColorChoice::Auto => set_colors(Term::stdout().is_term() && Term::stderr().is_term()),
     }
-    async fn get_cfg(path: PathBuf) -> ConfigFile {
+    async fn get_cfg(path: PathBuf, client: Client) -> ConfigFile {
         let mut contents = String::from("");
         if path == Path::new("-") {
             let bytes = stdin()
@@ -157,10 +158,10 @@ async fn main() {
         } else {
             contents = read_to_string(path).expect("Reading config file should be ok");
         };
-        ConfigFile::new(&contents).await
+        ConfigFile::new(&contents, client).await
     }
-    async fn lock(cfg: &mut ConfigFile, path: PathBuf) {
-        let lockfile = cfg.lock().await;
+    fn lock(cfg: &mut ConfigFile, path: PathBuf) {
+        let lockfile = cfg.lock();
         if path == Path::new("-") {
             println!("{lockfile}");
         } else {
@@ -168,16 +169,17 @@ async fn main() {
         }
     }
     let _ = BEGIN.elapsed(); // needed to initialize the instant for whatever reason
+    let client = Client::new();
     match args.action {
         Actions::Update => {
-            let c = &mut get_cfg(args.config_file).await;
-            update(c, true, args.verbosity).await;
-            lock(c, args.lock_file).await;
+            let c = &mut get_cfg(args.config_file, client.clone()).await;
+            update(c, true, args.verbosity, client.clone()).await;
+            lock(c, args.lock_file);
         }
         Actions::Purge => {
-            let c = &mut get_cfg(args.config_file).await;
+            let c = &mut get_cfg(args.config_file, client.clone()).await;
             purge(c, args.verbosity);
-            lock(c, args.lock_file).await;
+            lock(c, args.lock_file);
         }
         Actions::Tree {
             charset,
@@ -186,29 +188,26 @@ async fn main() {
         } => println!(
             "{}",
             tree(
-                &mut get_cfg(args.config_file).await, // no locking needed
+                &mut get_cfg(args.config_file, client.clone()).await, // no locking needed
                 charset,
                 prefix,
-                print_tarballs
+                print_tarballs,
+                client
             )
             .await
         ),
         Actions::Init { packages } => {
-            let buf = stream::iter(packages.into_iter())
-                .map(|pp| async move {
-                    let name = pp.to_string();
-                    pp.into_package()
-                        .await
-                        .unwrap_or_else(|_| panic!("Package {name} could not be parsed"))
-                })
-                .buffer_unordered(4);
-            let packages = buf.collect::<Vec<Package>>().await;
-            init(packages).await.expect("Initializing cfg should be ok");
+            init(
+                packages.into_package_list(client.clone()).await.unwrap(),
+                client,
+            )
+            .await
+            .expect("Initializing cfg should be ok");
         }
     }
 }
 
-async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
+async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client) {
     if !Path::new("./addons/").exists() {
         create_dir("./addons/").expect("Should be able to create addons folder");
     }
@@ -254,6 +253,7 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
         .map(|mut p| async {
             let p_name = p.to_string();
             let tx = if bar_or_info { tx.clone() } else { None };
+            let client = client.clone();
             async move {
                 if bar_or_info {
                     tx.as_ref()
@@ -261,9 +261,9 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity) {
                         .send(Status::Processing(p_name.clone()))
                         .unwrap();
                 }
-                p.download().await;
+                p.download(client).await;
                 if modify {
-                    p.modify().unwrap();
+                    p.modify();
                 };
                 if bar_or_info {
                     tx.unwrap().send(Status::Finished(p_name.clone())).unwrap();
@@ -394,6 +394,7 @@ async fn tree(
     charset: CharSet,
     prefix: PrefixType,
     print_tarballs: bool,
+    client: Client,
 ) -> String {
     let mut tree: String = if let Ok(s) = current_dir() {
         format!("{}\n", s.to_string_lossy())
@@ -417,6 +418,7 @@ async fn tree(
         print_tarballs,
         0,
         &mut count,
+        client,
     )
     .await;
     tree.push_str(format!("{} dependencies", HumanCount(count)).as_str());
@@ -432,6 +434,7 @@ async fn tree(
         print_tarballs: bool,
         depth: u32,
         count: &mut u64,
+        client: Client,
     ) {
         // the index is used to decide if the package is the last package,
         // so we can use a L instead of a T.
@@ -453,12 +456,12 @@ async fn tree(
             );
             if print_tarballs {
                 tree.push(' ');
-                tree.push_str(p.get_manifest().await.unwrap().tarball.as_str());
+                tree.push_str(p.manifest.tarball.as_str());
             }
             tree.push('\n');
             if p.has_deps() {
                 iter(
-                    &mut p.dependencies,
+                    &mut p.manifest.dependencies,
                     if prefix_type == PrefixType::Indent {
                         tmp = format!("{prefix}{}   ", if index != 0 { '│' } else { ' ' });
                         tmp.as_str()
@@ -472,6 +475,7 @@ async fn tree(
                     print_tarballs,
                     depth + 1,
                     count,
+                    client.clone(),
                 )
                 .await;
             }
@@ -480,7 +484,7 @@ async fn tree(
     tree
 }
 
-async fn init(mut packages: Vec<Package>) -> Result<()> {
+async fn init(mut packages: Vec<Package>, client: Client) -> Result<()> {
     let mut c = ConfigFile::default();
     if packages.is_empty() {
         let mut has_asked = false;
@@ -497,7 +501,7 @@ async fn init(mut packages: Vec<Package>) -> Result<()> {
             has_asked = true;
             let p: ParsedPackage = putils::input("Package?")?;
             let p_name = p.to_string();
-            let res = p.into_package().await;
+            let res = p.into_package(client.clone()).await;
             if let Err(e) = res {
                 putils::fail(format!("{p_name} could not be parsed: {e}").as_str())?;
                 just_failed = true;
@@ -535,14 +539,21 @@ async fn init(mut packages: Vec<Package>) -> Result<()> {
     if putils::confirm("Would you like to view the dependency tree?", true)? {
         println!(
             "{}",
-            tree(&mut c, CharSet::UTF8, PrefixType::Indent, false).await
+            tree(
+                &mut c,
+                CharSet::UTF8,
+                PrefixType::Indent,
+                false,
+                client.clone()
+            )
+            .await
         );
     };
 
     if !c.packages.is_empty()
         && putils::confirm("Would you like to install your new packages?", true)?
     {
-        update(&mut c, true, Verbosity::Normal).await;
+        update(&mut c, true, Verbosity::Normal, client.clone()).await;
     };
     println!("Goodbye!");
     Ok(())
@@ -583,9 +594,11 @@ mod test_utils {
 #[tokio::test]
 async fn gpm() {
     let _t = test_utils::mktemp();
+    let c = Client::new();
     let cfg_file =
-        &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into()).await;
-    update(cfg_file, false, Verbosity::Verbose).await;
+        &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into(), c.clone())
+            .await;
+    update(cfg_file, false, Verbosity::Verbose, c.clone()).await;
     assert_eq!(test_utils::hashd("addons").join("|"), "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329|8e77e3adf577d32c8bc98981f05d40b2eb303271da08bfa7e205d3f27e188bd7|a625595a71b159e33b3d1ee6c13bea9fc4372be426dd067186fe2e614ce76e3c|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c850a9300388d6da1566c12a389927c3353bf931c4d6ea59b02beb302aac03ea|d060936e5f1e8b1f705066ade6d8c6de90435a91c51f122905a322251a181a5c|d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5|d794f3cee783779f50f37a53e1d46d9ebbc5ee7b37c36d7b6ee717773b6955cd|e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87");
     purge(cfg_file, Verbosity::Verbose);
     assert_eq!(test_utils::hashd("addons"), vec![] as Vec<String>);
@@ -594,7 +607,8 @@ async fn gpm() {
             cfg_file,
             crate::CharSet::UTF8,
             crate::PrefixType::Indent,
-            false
+            false,
+            c.clone(),
         )
         .await
         .lines()

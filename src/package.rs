@@ -1,10 +1,9 @@
-use crate::config_file::ConfigFile;
 use anyhow::{anyhow, Result};
-use async_recursion::async_recursion;
 use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JValue;
+use reqwest::Client;
+use semver_rs::Version;
+use serde::Serialize;
 use sha1::{Digest, Sha1};
 use std::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, write};
 use std::io;
@@ -12,6 +11,9 @@ use std::path::{Component::Normal, Path, PathBuf};
 use std::str::FromStr;
 use std::{collections::HashMap, fmt};
 use tar::{Archive, EntryType::Directory};
+
+pub mod parsing;
+use parsing::*;
 
 const REGISTRY: &str = "https://registry.npmjs.org";
 
@@ -23,169 +25,101 @@ const REGISTRY: &str = "https://registry.npmjs.org";
 /// - removal
 pub struct Package {
     pub name: String,
-    pub version: String,
     #[serde(skip)]
-    pub dependencies: Vec<Package>,
+    pub version: Version,
     #[serde(skip)]
     pub indirect: bool,
     #[serde(flatten)]
-    pub manifest: Option<Manifest>,
-}
-#[derive(Default, Clone, Debug)]
-pub struct ParsedPackage {
-    pub name: String,
-    pub version: Option<String>,
+    pub manifest: Manifest,
 }
 
-#[derive(Clone, Deserialize, Eq, Ord, PartialEq, PartialOrd, Default, Debug, Serialize)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Debug, Serialize)]
 pub struct Manifest {
     pub integrity: String,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub shasum: String,
-    #[serde(skip_serializing)]
     pub tarball: String,
+    #[serde(skip)]
+    pub dependencies: Vec<Package>,
+    version: String,
 }
 
-impl ParsedPackage {
-    /// Turn into a [Package].
-    pub async fn into_package(self) -> Result<Package> {
-        if self.version.is_some() {
-            Package::new(self.name, self.version.unwrap()).await
-        } else {
-            Package::new_no_version(self.name).await
-        }
-    }
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+macro_rules! abbreviated_get {
+    ($url: expr, $client: expr) => {
+        $client
+            .get($url)
+            .header(
+                "User-Agent",
+                format!("gpm/{VERSION} (godot-package-manager/cli on GitHub)"),
+            )
+            .header(
+                "Accept",
+                "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8",
+            )
+            .send()
+            .await
+    };
 }
 
-impl fmt::Display for ParsedPackage {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}@{}",
-            self.name,
-            self.version.as_ref().unwrap_or(&"latest".to_string())
-        )
-    }
-}
-
-impl FromStr for ParsedPackage {
-    type Err = anyhow::Error;
-
-    /// Supports 3 version syntax variations: `:`, `=`, `@`, if version not specified, will fetch latest.
-    /// see https://docs.npmjs.com/cli/v7/configuring-npm/package-json#name
-    fn from_str(s: &str) -> Result<Self> {
-        #[inline]
-        fn not_too_long(s: &str) -> bool {
-            s.len() < 214
-        }
-        #[inline]
-        fn safe(s: &str) -> bool {
-            s.find(&[
-                ' ', '<', '>', '[', ']', '{', '}', '|', '\\', '^', '%', ':', '=',
-            ])
-            .is_none()
-        }
-        fn check(s: &str) -> Result<()> {
-            if not_too_long(s) && safe(s) {
-                Ok(())
-            } else {
-                Err(anyhow!("Invalid package name"))
-            }
-        }
-
-        fn split_p(s: &str, d: char) -> Result<ParsedPackage> {
-            let Some((p, v)) = s.split_once(d) else {
-                check(s)?;
-                return Ok(ParsedPackage {name: s.to_string(), ..Default::default()});
-            };
-            check(p)?;
-            Ok(ParsedPackage {
-                name: p.to_string(),
-                version: Some(v.to_string()),
-            })
-        }
-        if s.contains(':') {
-            // @bendn/gdcli:1.2.5
-            return split_p(s, ':');
-        } else if s.contains('=') {
-            // @bendn/gdcli=1.2.5
-            return split_p(s, '=');
-        } else {
-            // @bendn/gdcli@1.2.5
-            if s.as_bytes()[0] == b'@' {
-                let mut owned_s = s.to_string();
-                owned_s.remove(0);
-                let Some((p, v)) = owned_s.split_once('@') else {
-                    check(s)?;
-                    return Ok(ParsedPackage {name: s.to_string(), ..Default::default()});
-                };
-                check(&format!("@{p}")[..])?;
-                return Ok(ParsedPackage {
-                    name: format!("@{p}"),
-                    version: Some(v.to_string()),
-                });
-            }
-            return split_p(s, '@');
-        };
-    }
+macro_rules! get {
+    ($url: expr, $client: expr) => {
+        $client
+            .get($url)
+            .header(
+                "User-Agent",
+                format!("gpm/{VERSION} (godot-package-manager/cli on GitHub)"),
+            )
+            .send()
+            .await
+    };
 }
 
 impl Package {
     #[inline]
     /// Does this package have dependencies?
-    pub fn has_deps(&self) -> bool {
-        !self.dependencies.is_empty()
+    pub fn has_deps(&mut self) -> bool {
+        !self.manifest.dependencies.is_empty()
     }
 
     /// Creates a new [Package] from a name and version.
-    /// Calls the Package::get_deps() function, so it will
-    /// try to access the fs, and if it fails, it will make
-    /// calls to cdn.jsdelivr.net to get the `package.json` file.
-    pub async fn new(name: String, version: String) -> Result<Package> {
-        let mut p = Package {
-            name,
-            version,
+    /// Makes network calls to get the manifest (which makes network calls to get dependency manifests)
+    pub async fn new(name: String, version: Version, client: Client) -> Result<Self> {
+        Ok(Self {
+            name: name.clone(),
+            version: version.clone(),
+            manifest: Self::get_manifest(client, name, version).await?,
             ..Default::default()
-        };
-        p.get_deps().await?;
-        Ok(p)
+        })
     }
 
     /// Create a package from a [str]. see also [ParsedPackage].
     #[allow(dead_code)] // used for tests
-    pub async fn create_from_str(s: &str) -> Result<Package> {
-        ParsedPackage::from_str(s).unwrap().into_package().await
+    pub async fn create_from_str(s: &str, client: Client) -> Result<Package> {
+        ParsedPackage::from_str(s)
+            .unwrap()
+            .into_package(client)
+            .await
     }
 
     /// Creates a new [Package] from a name, gets the latest version from registry/name.
-    pub async fn new_no_version(name: String) -> Result<Package> {
-        let resp = reqwest::get(&format!("{REGISTRY}/{name}"))
-            .await?
+    pub async fn new_no_version(name: String, client: Client) -> Result<Package> {
+        let resp = abbreviated_get!(format!("{REGISTRY}/{name}/latest"), client.clone())?
             .text()
             .await?;
         if resp == "\"Not Found\"" {
             return Err(anyhow!("Package {name} was not found"));
         };
-        let resp = serde_json::from_str::<JValue>(&resp)?;
-        let v = resp
-            .get("dist-tags")
-            .ok_or(anyhow!("No dist tags!"))?
-            .get("latest")
-            .ok_or(anyhow!("No latest!"))?
-            .as_str()
-            .ok_or(anyhow!("Latest not string!"))?;
-        let mut p = Package::new(name, v.to_string()).await?;
-        p.manifest = serde_json::from_str(
-            resp.get("versions")
-                .ok_or(anyhow!("No versions!"))?
-                .get(v)
-                .ok_or(anyhow!("No latest version!"))?
-                .to_string()
-                .as_str(),
-        )
-        .expect("Manifest");
-        p.get_deps().await?;
-        Ok(p)
+        let resp = serde_json::from_str::<ParsedManifest>(&resp)?
+            .into_manifest(client.clone())
+            .await?;
+        Ok(Package {
+            name,
+            version: Version::new(&resp.version).parse()?,
+            manifest: resp,
+            ..Default::default()
+        })
     }
 
     /// Returns wether this package is installed.
@@ -202,10 +136,9 @@ impl Package {
 
     /// Installs this [Package] to a download directory,
     /// depending on wether this package is a direct dependency or not.
-    pub async fn download(&mut self) {
+    pub async fn download(&mut self, client: Client) {
         self.purge();
-        let bytes = reqwest::get(&self.get_manifest().await.unwrap().tarball)
-            .await
+        let bytes = get!(&self.manifest.tarball, client)
             .expect("Tarball download should work")
             .bytes()
             .await
@@ -216,8 +149,8 @@ impl Package {
         hasher.update(&bytes);
         const ERR: &str = "Tarball shasum should be a valid hex string";
         assert_eq!(
-            self.get_manifest().await.unwrap().shasum,
-            format!("{:x}", hasher.finalize()),
+            &self.manifest.shasum,
+            &format!("{:x}", hasher.finalize()),
             "Tarball did not match checksum!"
         );
 
@@ -269,71 +202,21 @@ impl Package {
         .expect("Tarball should unpack");
     }
 
-    /// Gets the [ConfigFile] for this [Package].
-    /// Will attempt to read the `package.json` file, if this package is installed.
-    /// Else it will make network calls to `cdn.jsdelivr.net`.
-    #[async_recursion]
-    pub async fn get_config_file(&self) -> Result<ConfigFile> {
-        fn get(f: String) -> io::Result<String> {
-            read_to_string(Path::new(&f).join("package.json"))
-        }
-        #[rustfmt::skip]
-        let c: Option<String> = if let Ok(c) = get(self.indirect_download_dir()) { Some(c) }
-                                else if let Ok(c) = get(self.download_dir()) { Some(c) }
-                                else { None };
-        if let Some(c) = c {
-            if let Ok(n) = ConfigFile::parse(&c, crate::config_file::ConfigType::JSON).await {
-                return Ok(n);
-            }
-        }
-        ConfigFile::parse(
-            &reqwest::get(&format!(
-                "https://cdn.jsdelivr.net/npm/{}@{}/package.json",
-                self.name, self.version,
-            ))
-            .await
-            .map_err(|_| {
-                anyhow!("Request to cdn.jsdelivr.net failed, package/version doesnt exist")
-            })?
-            .text()
-            .await?,
-            crate::config_file::ConfigType::JSON,
-        )
-        .await
-    }
-
     /// Gets the package manifest and puts it in `self.manfiest`.
-    pub async fn get_manifest(&mut self) -> Result<&Manifest> {
-        if self.manifest.is_some() {
-            return Ok(self.manifest.as_ref().unwrap());
-        }
-        let resp = reqwest::get(&format!("{REGISTRY}/{}/{}", self.name, self.version))
-            .await?
+    pub async fn get_manifest(client: Client, name: String, version: Version) -> Result<Manifest> {
+        let resp = abbreviated_get!(&format!("{REGISTRY}/{name}/{version}"), client.clone())?
             .text()
             .await?;
         if resp == "\"Not Found\"" {
+            return Err(anyhow!("Package {name}@{version} was not found",));
+        } else if resp == format!("\"version not found: {version}\"") {
             return Err(anyhow!(
-                "Package {}@{} was not found",
-                self.name,
-                self.version
-            ));
-        } else if resp == format!("\"version not found: {}\"", self.version) {
-            return Err(anyhow!(
-                "Package {} exists, but version '{}' not found",
-                self.name,
-                self.version
+                "Package {name} exists, but version '{version}' was not found"
             ));
         }
-        let manifest = serde_json::from_str(
-            &serde_json::from_str::<JValue>(resp.as_str())
-                .unwrap()
-                .get("dist")
-                .unwrap()
-                .to_string(),
-        )
-        .unwrap_or_else(|_| panic!("Unable to get manifest for package {self}"));
-        self.manifest = Some(manifest);
-        return Ok(self.manifest.as_ref().unwrap());
+        serde_json::from_str::<ParsedManifest>(&resp)?
+            .into_manifest(client)
+            .await
     }
 
     /// Returns the download directory for this package depending on wether it is indirect or not.
@@ -353,16 +236,6 @@ impl Package {
     /// The download directory if this package is a indirect dep.
     fn indirect_download_dir(&self) -> String {
         format!("./addons/__gpm_deps/{}/{}", self.name, self.version)
-    }
-
-    /// Gets the dependencies of this [Package], placing them in `self.dependencies`.
-    async fn get_deps(&mut self) -> Result<()> {
-        let cfg = self.get_config_file().await?;
-        cfg.packages.into_iter().for_each(|mut dep| {
-            dep.indirect = true;
-            self.dependencies.push(dep);
-        });
-        Ok(())
     }
 }
 
@@ -462,7 +335,7 @@ impl Package {
     }
 
     /// Recursively modifies a directory.
-    fn recursive_modify(&self, dir: PathBuf, dep_map: &HashMap<String, String>) -> io::Result<()> {
+    fn recursive_modify(&self, dir: PathBuf, dep_map: &HashMap<String, String>) -> Result<()> {
         for entry in read_dir(&dir)? {
             let p = entry?;
             if p.path().is_dir() {
@@ -496,33 +369,37 @@ impl Package {
         Ok(())
     }
 
-    fn dep_map(&self) -> HashMap<String, String> {
+    fn dep_map(&mut self) -> Result<HashMap<String, String>> {
         let mut dep_map = HashMap::<String, String>::new();
-        fn add(p: &Package, dep_map: &mut HashMap<String, String>) {
-            let d = p.download_dir().strip_prefix("./").unwrap().to_string();
+        fn add(p: &Package, dep_map: &mut HashMap<String, String>) -> Result<()> {
+            let d = p
+                .download_dir()
+                .strip_prefix("./")
+                .ok_or(anyhow!("cant strip prefix!"))?
+                .to_string();
             dep_map.insert(p.name.clone(), d.clone());
             // unscoped (@ben/cli => cli) (for compat)
             if let Some((_, s)) = p.name.split_once('/') {
                 dep_map.insert(s.into(), d);
             }
+            Ok(())
         }
-        for pkg in &self.dependencies {
-            add(pkg, &mut dep_map);
+        for pkg in &self.manifest.dependencies {
+            add(pkg, &mut dep_map)?;
         }
-        add(self, &mut dep_map);
-        dep_map
+        add(self, &mut dep_map)?;
+        Ok(dep_map)
     }
 
     /// The catalyst for `recursive_modify`.
-    pub fn modify(&self) -> io::Result<()> {
+    pub fn modify(&mut self) {
         if !self.is_installed() {
             panic!("Attempting to modify a package that is not installed");
         }
 
-        self.recursive_modify(
-            Path::new(&self.download_dir()).to_path_buf(),
-            &self.dep_map(),
-        )
+        let map = &self.dep_map().unwrap();
+        self.recursive_modify(Path::new(&self.download_dir()).to_path_buf(), map)
+            .unwrap();
     }
 }
 
@@ -540,10 +417,11 @@ mod tests {
     #[tokio::test]
     async fn download() {
         let _t = crate::test_utils::mktemp();
-        let mut p = Package::create_from_str("@bendn/test:2.0.10")
+        let c = Client::new();
+        let mut p = Package::create_from_str("@bendn/test:2.0.10", c.clone())
             .await
             .unwrap();
-        p.download().await;
+        p.download(c.clone()).await;
         assert_eq!(
             crate::test_utils::hashd(p.download_dir().as_str()),
             [
@@ -560,10 +438,11 @@ mod tests {
     async fn dep_map() {
         // no fs was touched in the making of this test
         assert_eq!(
-            Package::create_from_str("@bendn/test@2.0.10")
+            Package::create_from_str("@bendn/test@2.0.10", Client::new())
                 .await
                 .unwrap()
-                .dep_map(),
+                .dep_map()
+                .unwrap(),
             HashMap::from([
                 ("test".into(), "addons/@bendn/test".into()),
                 ("@bendn/test".into(), "addons/@bendn/test".into()),
@@ -582,12 +461,13 @@ mod tests {
     #[tokio::test]
     async fn modify_load() {
         let _t = crate::test_utils::mktemp();
-        let mut p = Package::create_from_str("@bendn/test=2.0.10")
+        let c = Client::new();
+        let mut p = Package::create_from_str("@bendn/test=2.0.10", c.clone())
             .await
             .unwrap();
-        let dep_map = &p.dep_map();
+        let dep_map = &p.dep_map().unwrap();
         let cwd = Path::new("addons/@bendn/test").into();
-        p.download().await;
+        p.download(c).await;
         p.indirect = false;
         assert_eq!(
             p.modify_load(Path::new("addons/test/main.gd"), cwd, dep_map)

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
 use reqwest::Client;
-use semver_rs::Version;
+use semver_rs::{Parseable, Range, Version};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 use std::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, write};
@@ -31,6 +31,8 @@ pub struct Package {
     pub indirect: bool,
     #[serde(flatten)]
     pub manifest: Manifest,
+    #[serde(rename = "version")]
+    pub _lockfile_version_string: String, // for lockfile, do not use
 }
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Debug, Serialize)]
@@ -41,7 +43,8 @@ pub struct Manifest {
     pub tarball: String,
     #[serde(skip)]
     pub dependencies: Vec<Package>,
-    version: String,
+    #[serde(skip)]
+    version: Version,
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -85,11 +88,37 @@ impl Package {
 
     /// Creates a new [Package] from a name and version.
     /// Makes network calls to get the manifest (which makes network calls to get dependency manifests)
-    pub async fn new(name: String, version: Version, client: Client) -> Result<Self> {
+    pub async fn new(name: String, version: String, client: Client) -> Result<Self> {
+        let version = version.trim();
+        if version.is_empty() {
+            return Self::new_no_version(name, client).await;
+        }
+        let first_byte = version.as_bytes()[0];
+        let v: Version =
+            if first_byte == b'^' || first_byte == b'~' || version.find(&['*', 'x']).is_some() {
+                let r = Range::new(version).parse()?; // this does ~ and ^ parsing (plus a few more things i think)
+                let packument = Self::get_packument(client.clone(), name.clone()).await?;
+                for v in packument.versions {
+                    let version = Version::parse(&v.version, None)?;
+                    if r.test(&version) {
+                        return Ok(Self {
+                            name,
+                            _lockfile_version_string: v.version.to_string(),
+                            version: version,
+                            manifest: v.into_manifest(client).await?,
+                            ..Default::default()
+                        });
+                    };
+                }
+                return Err(anyhow!("Failed to match version for package {name}."));
+            } else {
+                Version::parse(version, None)?
+            };
         Ok(Self {
             name: name.clone(),
-            version: version.clone(),
-            manifest: Self::get_manifest(client, name, version).await?,
+            version: v.clone(),
+            _lockfile_version_string: v.to_string(),
+            manifest: Self::get_manifest(client, name, v).await?,
             ..Default::default()
         })
     }
@@ -116,7 +145,8 @@ impl Package {
             .await?;
         Ok(Package {
             name,
-            version: Version::new(&resp.version).parse()?,
+            _lockfile_version_string: resp.version.to_string(),
+            version: resp.version.clone(),
             manifest: resp,
             ..Default::default()
         })
@@ -200,6 +230,16 @@ impl Package {
             Path::new(&self.download_dir()),
         )
         .expect("Tarball should unpack");
+    }
+
+    pub async fn get_packument(client: Client, name: String) -> Result<Packument> {
+        let resp = abbreviated_get!(&format!("{REGISTRY}/{name}"), client.clone())?
+            .text()
+            .await?;
+        if resp == "\"Not Found\"" {
+            return Err(anyhow!("Package {name} was not found",));
+        };
+        Ok(serde_json::from_str::<ParsedPackument>(&resp)?.into())
     }
 
     /// Gets the package manifest and puts it in `self.manfiest`.

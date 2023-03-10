@@ -7,12 +7,6 @@ use semver_rs::Version;
 use serde::Deserialize;
 use std::{collections::HashMap, fmt};
 
-macro_rules! parse_version {
-    ($ver: expr) => {
-        VersionType::Normal(Version::new($ver).parse()?)
-    };
-}
-
 #[derive(Clone, Debug)]
 pub struct ParsedPackage {
     pub name: String,
@@ -22,7 +16,7 @@ pub struct ParsedPackage {
 #[derive(Clone, Debug)]
 pub enum VersionType {
     /// Normal version, just use it
-    Normal(Version),
+    Normal(String),
     /// Abstract version, figure it out later
     Latest,
 }
@@ -33,8 +27,8 @@ impl fmt::Display for VersionType {
             f,
             "{}",
             match self {
-                VersionType::Normal(v) => v.to_string(),
-                VersionType::Latest => "latest".to_string(),
+                VersionType::Normal(v) => v,
+                VersionType::Latest => "latest",
             }
         )
     }
@@ -89,7 +83,7 @@ impl std::str::FromStr for ParsedPackage {
             check(p)?;
             Ok(ParsedPackage {
                 name: p.to_string(),
-                version: parse_version!(&v.to_string()),
+                version: VersionType::Normal(v.to_string()),
             })
         }
         if s.contains(':') {
@@ -110,7 +104,7 @@ impl std::str::FromStr for ParsedPackage {
                 check(&format!("@{p}")[..])?;
                 return Ok(ParsedPackage {
                     name: format!("@{p}"),
-                    version: parse_version!(&v.to_string()),
+                    version: VersionType::Normal(v.to_string()),
                 });
             }
             return split_p(s, '@');
@@ -120,10 +114,10 @@ impl std::str::FromStr for ParsedPackage {
 
 #[derive(Clone, Default, Debug, Deserialize)]
 pub struct ParsedManifest {
-    dist: ParsedManifestDist,
+    pub dist: ParsedManifestDist,
     #[serde(default)]
-    dependencies: HashMap<String, String>,
-    version: String,
+    pub dependencies: HashMap<String, String>,
+    pub version: String,
 }
 
 #[derive(Clone, Default, Debug, Deserialize)]
@@ -139,9 +133,32 @@ impl ParsedManifest {
             integrity: self.dist.integrity,
             shasum: self.dist.shasum,
             tarball: self.dist.tarball,
-            version: self.version,
+            version: Version::new(&self.version).parse()?,
             dependencies: self.dependencies.into_package_list(client).await?,
         })
+    }
+}
+
+pub struct Packument {
+    pub versions: Vec<ParsedManifest>, // note: unprocessed manifests because we dont want to make requests for versions we dont need
+}
+
+#[derive(Clone, Default, Debug, Deserialize)]
+pub struct ParsedPackument {
+    pub versions: HashMap<String, ParsedManifest>,
+}
+
+impl Into<Packument> for ParsedPackument {
+    fn into(self) -> Packument {
+        let mut versions: Vec<ParsedManifest> = self.versions.into_iter().map(|(_, p)| p).collect();
+        // sort newest first (really badly)
+        versions.sort_by(|a, b| {
+            Version::new(&b.version)
+                .parse()
+                .unwrap()
+                .cmp(&Version::new(&a.version).parse().unwrap())
+        });
+        Packument { versions }
     }
 }
 
@@ -156,10 +173,7 @@ impl IntoPackageList for HashMap<String, String> {
         let buf = stream::iter(self.into_iter())
             .map(|(name, version)| async {
                 let client = client.clone();
-                async move {
-                    Package::new(name, Version::new(&version).parse().unwrap(), client).await
-                }
-                .await
+                async move { Package::new(name, version, client).await }.await
             })
             .buffer_unordered(crate::PARALLEL);
         let mut packages = vec![];

@@ -1,5 +1,11 @@
 [
   {
+    "name": "@bendn/splitter",
+    "integrity": "sha512-HT7q5qv6OEpX95e5r+kAsasoAvH0Mgf+aT4SdKQ18fyDIn1dW02WqbulF0AMwHufgRZkMf9SnQGiAq79P5ZIKQ==",
+    "tarball": "https://registry.npmjs.org/@bendn/splitter/-/splitter-1.0.6.tgz",
+    "version": "1.0.6"
+  },
+  {
     "name": "@bendn/test",
     "integrity": "sha512-hyPGxDG8poa2ekmWr1BeTCUa7YaZYfhsN7jcLJ3q2cQVlowcTnzqmz4iV3t21QFyabE5R+rV+y6d5dAItrJeDw==",
     "tarball": "https://registry.npmjs.org/@bendn/test/-/test-2.0.10.tgz",
@@ -10,5 +16,11 @@
     "integrity": "sha512-/YOAd1+K4JlKvPTmpX8B7VWxGtFrxKq4R0A6u5qOaaVPK6uGsl4dGZaIHpxuqcurEcwPEOabkoShXKZaOXB0lw==",
     "tarball": "https://registry.npmjs.org/@bendn/gdcli/-/gdcli-1.2.5.tgz",
     "version": "1.2.5"
+  },
+  {
+    "name": "@bendn/stockfish.gd",
+    "integrity": "sha512-QvJ/d8rRaaz2Q0EchaA4ub2quqAsiQowIRyBhGe7HG4OCnANbhFaoN9id1tSbUG70G+ZIQ7ZZQVQmIBKKQJX7A==",
+    "tarball": "https://registry.npmjs.org/@bendn/stockfish.gd/-/stockfish.gd-2.1.2.tgz",
+    "version": "2.1.2"
   }
 ]

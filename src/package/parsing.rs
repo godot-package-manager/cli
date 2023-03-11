@@ -2,16 +2,10 @@ use crate::package::{Manifest, Package};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 use semver_rs::Version;
 use serde::Deserialize;
 use std::{collections::HashMap, fmt};
-
-macro_rules! parse_version {
-    ($ver: expr) => {
-        VersionType::Normal(Version::new($ver).parse()?)
-    };
-}
 
 #[derive(Clone, Debug)]
 pub struct ParsedPackage {
@@ -22,7 +16,7 @@ pub struct ParsedPackage {
 #[derive(Clone, Debug)]
 pub enum VersionType {
     /// Normal version, just use it
-    Normal(Version),
+    Normal(String),
     /// Abstract version, figure it out later
     Latest,
 }
@@ -33,8 +27,8 @@ impl fmt::Display for VersionType {
             f,
             "{}",
             match self {
-                VersionType::Normal(v) => v.to_string(),
-                VersionType::Latest => "latest".to_string(),
+                VersionType::Normal(v) => v,
+                VersionType::Latest => "latest",
             }
         )
     }
@@ -42,7 +36,7 @@ impl fmt::Display for VersionType {
 
 impl ParsedPackage {
     /// Turn into a [Package].
-    pub async fn into_package(self, client: Client) -> Result<Package> {
+    pub async fn into_package(self, client: ClientWithMiddleware) -> Result<Package> {
         match self.version {
             VersionType::Normal(v) => Package::new(self.name, v, client).await,
             VersionType::Latest => Package::new_no_version(self.name, client).await,
@@ -89,7 +83,7 @@ impl std::str::FromStr for ParsedPackage {
             check(p)?;
             Ok(ParsedPackage {
                 name: p.to_string(),
-                version: parse_version!(&v.to_string()),
+                version: VersionType::Normal(v.to_string()),
             })
         }
         if s.contains(':') {
@@ -110,7 +104,7 @@ impl std::str::FromStr for ParsedPackage {
                 check(&format!("@{p}")[..])?;
                 return Ok(ParsedPackage {
                     name: format!("@{p}"),
-                    version: parse_version!(&v.to_string()),
+                    version: VersionType::Normal(v.to_string()),
                 });
             }
             return split_p(s, '@');
@@ -120,46 +114,64 @@ impl std::str::FromStr for ParsedPackage {
 
 #[derive(Clone, Default, Debug, Deserialize)]
 pub struct ParsedManifest {
-    dist: ParsedManifestDist,
+    pub dist: ParsedManifestDist,
     #[serde(default)]
-    dependencies: HashMap<String, String>,
-    version: String,
+    pub dependencies: HashMap<String, String>,
+    pub version: String,
 }
 
 #[derive(Clone, Default, Debug, Deserialize)]
 pub struct ParsedManifestDist {
-    pub integrity: String,
     pub shasum: String,
     pub tarball: String,
 }
 
 impl ParsedManifest {
-    pub async fn into_manifest(self, client: Client) -> Result<Manifest> {
+    pub async fn into_manifest(self, client: ClientWithMiddleware) -> Result<Manifest> {
         Ok(Manifest {
-            integrity: self.dist.integrity,
             shasum: self.dist.shasum,
             tarball: self.dist.tarball,
-            version: self.version,
+            version: Version::new(&self.version).parse()?,
             dependencies: self.dependencies.into_package_list(client).await?,
         })
     }
 }
 
+pub struct Packument {
+    pub versions: Vec<ParsedManifest>, // note: unprocessed manifests because we dont want to make requests for versions we dont need
+}
+
+#[derive(Clone, Default, Debug, Deserialize)]
+pub struct ParsedPackument {
+    pub versions: HashMap<String, ParsedManifest>,
+}
+
+impl From<ParsedPackument> for Packument {
+    fn from(val: ParsedPackument) -> Self {
+        let mut versions: Vec<ParsedManifest> = val.versions.into_values().collect();
+        // sort newest first (really badly)
+        versions.sort_by(|a, b| {
+            Version::new(&b.version)
+                .parse()
+                .unwrap()
+                .cmp(&Version::new(&a.version).parse().unwrap())
+        });
+        Packument { versions }
+    }
+}
+
 #[async_trait]
 pub trait IntoPackageList {
-    async fn into_package_list(self, client: Client) -> Result<Vec<Package>>;
+    async fn into_package_list(self, client: ClientWithMiddleware) -> Result<Vec<Package>>;
 }
 
 #[async_trait]
 impl IntoPackageList for HashMap<String, String> {
-    async fn into_package_list(self, client: Client) -> Result<Vec<Package>> {
+    async fn into_package_list(self, client: ClientWithMiddleware) -> Result<Vec<Package>> {
         let buf = stream::iter(self.into_iter())
             .map(|(name, version)| async {
                 let client = client.clone();
-                async move {
-                    Package::new(name, Version::new(&version).parse().unwrap(), client).await
-                }
-                .await
+                async move { Package::new(name, version, client).await }.await
             })
             .buffer_unordered(crate::PARALLEL);
         let mut packages = vec![];
@@ -175,7 +187,7 @@ impl IntoPackageList for HashMap<String, String> {
 #[async_trait]
 impl IntoPackageList for Vec<ParsedPackage> {
     /// Fake result implementation
-    async fn into_package_list(self, client: Client) -> Result<Vec<Package>> {
+    async fn into_package_list(self, client: ClientWithMiddleware) -> Result<Vec<Package>> {
         let buf = stream::iter(self.into_iter())
             .map(|pp| async {
                 let client = client.clone();

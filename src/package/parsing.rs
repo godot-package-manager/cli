@@ -2,7 +2,7 @@ use crate::package::{Manifest, Package};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 use semver_rs::Version;
 use serde::Deserialize;
 use std::{collections::HashMap, fmt};
@@ -36,7 +36,7 @@ impl fmt::Display for VersionType {
 
 impl ParsedPackage {
     /// Turn into a [Package].
-    pub async fn into_package(self, client: Client) -> Result<Package> {
+    pub async fn into_package(self, client: ClientWithMiddleware) -> Result<Package> {
         match self.version {
             VersionType::Normal(v) => Package::new(self.name, v, client).await,
             VersionType::Latest => Package::new_no_version(self.name, client).await,
@@ -122,15 +122,13 @@ pub struct ParsedManifest {
 
 #[derive(Clone, Default, Debug, Deserialize)]
 pub struct ParsedManifestDist {
-    pub integrity: String,
     pub shasum: String,
     pub tarball: String,
 }
 
 impl ParsedManifest {
-    pub async fn into_manifest(self, client: Client) -> Result<Manifest> {
+    pub async fn into_manifest(self, client: ClientWithMiddleware) -> Result<Manifest> {
         Ok(Manifest {
-            integrity: self.dist.integrity,
             shasum: self.dist.shasum,
             tarball: self.dist.tarball,
             version: Version::new(&self.version).parse()?,
@@ -164,12 +162,12 @@ impl Into<Packument> for ParsedPackument {
 
 #[async_trait]
 pub trait IntoPackageList {
-    async fn into_package_list(self, client: Client) -> Result<Vec<Package>>;
+    async fn into_package_list(self, client: ClientWithMiddleware) -> Result<Vec<Package>>;
 }
 
 #[async_trait]
 impl IntoPackageList for HashMap<String, String> {
-    async fn into_package_list(self, client: Client) -> Result<Vec<Package>> {
+    async fn into_package_list(self, client: ClientWithMiddleware) -> Result<Vec<Package>> {
         let buf = stream::iter(self.into_iter())
             .map(|(name, version)| async {
                 let client = client.clone();
@@ -189,7 +187,7 @@ impl IntoPackageList for HashMap<String, String> {
 #[async_trait]
 impl IntoPackageList for Vec<ParsedPackage> {
     /// Fake result implementation
-    async fn into_package_list(self, client: Client) -> Result<Vec<Package>> {
+    async fn into_package_list(self, client: ClientWithMiddleware) -> Result<Vec<Package>> {
         let buf = stream::iter(self.into_iter())
             .map(|pp| async {
                 let client = client.clone();

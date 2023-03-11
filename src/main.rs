@@ -10,10 +10,12 @@ use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
 use config_file::{ConfigFile, ConfigType};
 use console::{self, Term};
 use futures::stream::{self, StreamExt};
+use http_cache_reqwest::{CACacheManager, Cache, CacheMode, HttpCache};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressIterator};
 use lazy_static::lazy_static;
 use package::parsing::ParsedPackage;
-use reqwest::Client;
+use reqwest::{header::HeaderMap, ClientBuilder as NormalClientBuilder};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
@@ -146,7 +148,7 @@ async fn main() {
         ColorChoice::Never => set_colors(false),
         ColorChoice::Auto => set_colors(Term::stdout().is_term() && Term::stderr().is_term()),
     }
-    async fn get_cfg(path: PathBuf, client: Client) -> ConfigFile {
+    async fn get_cfg(path: PathBuf, client: ClientWithMiddleware) -> ConfigFile {
         let mut contents = String::from("");
         if path == Path::new("-") {
             let bytes = stdin()
@@ -168,8 +170,18 @@ async fn main() {
             write(path, lockfile).expect("Writing lock file should be ok");
         }
     }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "User-Agent",
+        format!(
+            "gpm/{} (godot-package-manager/cli on GitHub)",
+            env!("CARGO_PKG_VERSION")
+        )
+        .parse()
+        .unwrap(),
+    );
+    let client = mkclient();
     let _ = BEGIN.elapsed(); // needed to initialize the instant for whatever reason
-    let client = Client::new();
     match args.action {
         Actions::Update => {
             let c = &mut get_cfg(args.config_file, client.clone()).await;
@@ -207,7 +219,39 @@ async fn main() {
     }
 }
 
-async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client) {
+pub fn mkclient() -> ClientWithMiddleware {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "User-Agent",
+        format!(
+            "gpm/{} (godot-package-manager/cli on GitHub)",
+            env!("CARGO_PKG_VERSION")
+        )
+        .parse()
+        .unwrap(),
+    );
+    let path = if Path::new(".import").is_dir() {
+        ".import/gpm_cache"
+    } else if Path::new(".godot").is_dir() {
+        ".godot/gpm_cache"
+    } else {
+        ".gpm_cache"
+    };
+    ClientBuilder::new(
+        NormalClientBuilder::new()
+            .default_headers(headers)
+            .build()
+            .unwrap(),
+    )
+    .with(Cache(HttpCache {
+        mode: CacheMode::Default,
+        manager: CACacheManager { path: path.into() },
+        options: None,
+    }))
+    .build()
+}
+
+async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: ClientWithMiddleware) {
     if !Path::new("./addons/").exists() {
         create_dir("./addons/").expect("Should be able to create addons folder");
     }
@@ -394,7 +438,7 @@ async fn tree(
     charset: CharSet,
     prefix: PrefixType,
     print_tarballs: bool,
-    client: Client,
+    client: ClientWithMiddleware,
 ) -> String {
     let mut tree: String = if let Ok(s) = current_dir() {
         format!("{}\n", s.to_string_lossy())
@@ -434,7 +478,7 @@ async fn tree(
         print_tarballs: bool,
         depth: u32,
         count: &mut u64,
-        client: Client,
+        client: ClientWithMiddleware,
     ) {
         // the index is used to decide if the package is the last package,
         // so we can use a L instead of a T.
@@ -484,7 +528,7 @@ async fn tree(
     tree
 }
 
-async fn init(mut packages: Vec<Package>, client: Client) -> Result<()> {
+async fn init(mut packages: Vec<Package>, client: ClientWithMiddleware) -> Result<()> {
     let mut c = ConfigFile::default();
     if packages.is_empty() {
         let mut has_asked = false;
@@ -594,7 +638,7 @@ mod test_utils {
 #[tokio::test]
 async fn gpm() {
     let _t = test_utils::mktemp();
-    let c = Client::new();
+    let c = mkclient();
     let cfg_file =
         &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into(), c.clone())
             .await;

@@ -292,7 +292,7 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client
         Finished(String),
     }
     let bar_or_info = v.bar() || v.info();
-    let (tx, rx) = bar_or_info.then(|| channel()).unzip();
+    let (tx, rx) = bar_or_info.then(channel).unzip();
     let buf = stream::iter(packages)
         .map(|mut p| async {
             let p_name = p.to_string();

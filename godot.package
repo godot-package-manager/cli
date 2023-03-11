@@ -1,6 +1,5 @@
 packages: {
 	@bendn/test: "^2.0.0"
 	@bendn/splitter: "1.0.x"
-	@bendn/stockfish.gd: "*"
-	npm: "*"
+	@bendn/stockfish.gd: "1.*"
 }

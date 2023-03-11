@@ -79,7 +79,6 @@ impl Package {
         if version.is_empty() {
             return Self::new_no_version(name, client).await;
         }
-        println!("parsing package {name} {version}");
         let r = Range::new(version)
             .parse()
             .with_context(|| format!("parsing version range {version} for {name}"))?; // this does ~ and ^  and >= and < and || e.q parsing
@@ -298,12 +297,7 @@ impl Package {
     /// [ext_resource path="res://addons/__gpm_deps/my_awesome_addon/wow.gd" type="Script" id=1]
     /// ```
     /// godot will automatically re-absolute-ify the path, but that is fine.
-    fn modify_tres_loads(
-        &self,
-        t: &String,
-        cwd: &Path,
-        dep_map: &HashMap<String, String>,
-    ) -> String {
+    fn modify_tres_loads(&self, t: &str, cwd: &Path, dep_map: &HashMap<String, String>) -> String {
         lazy_static::lazy_static! {
             static ref TRES_LOAD_R: Regex = Regex::new(r#"\[ext_resource path="([^"]+)""#).unwrap();
         }

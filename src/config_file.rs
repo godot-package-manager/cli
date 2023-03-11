@@ -64,7 +64,7 @@ impl ParsedConfig {
         for mut p in &mut packages {
             p.indirect = false
         }
-        ConfigFile { packages: packages }
+        ConfigFile { packages }
     }
 }
 
@@ -131,6 +131,7 @@ impl ConfigFile {
                 pkgs.push(p)
             };
         }
+        pkgs.sort();
         serde_json::to_string_pretty(&pkgs).unwrap()
     }
 
@@ -190,10 +191,9 @@ mod tests {
         struct LockFileEntry {
             pub name: String,
             pub version: String,
-            pub integrity: String,
         }
         let wanted_lockfile = serde_json::from_str::<Vec<LockFileEntry>>(
-            r#"[{"name":"@bendn/test","version":"2.0.10"},{"name":"@bendn/gdcli","version":"1.2.5"}]"#,
+            r#"[{"name":"@bendn/gdcli","version":"1.2.5"},{"name":"@bendn/test","version":"2.0.10"}]"#,
         ).unwrap();
         for cfg in cfgs {
             assert_eq!(cfg.packages.len(), 1);

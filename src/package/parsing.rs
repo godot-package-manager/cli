@@ -146,9 +146,9 @@ pub struct ParsedPackument {
     pub versions: HashMap<String, ParsedManifest>,
 }
 
-impl Into<Packument> for ParsedPackument {
-    fn into(self) -> Packument {
-        let mut versions: Vec<ParsedManifest> = self.versions.into_iter().map(|(_, p)| p).collect();
+impl From<ParsedPackument> for Packument {
+    fn from(val: ParsedPackument) -> Self {
+        let mut versions: Vec<ParsedManifest> = val.versions.into_values().collect();
         // sort newest first (really badly)
         versions.sort_by(|a, b| {
             Version::new(&b.version)

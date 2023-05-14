@@ -2,7 +2,7 @@ use crate::package::parsing::IntoPackageList;
 use crate::package::Package;
 use anyhow::Result;
 use console::style;
-use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -59,12 +59,12 @@ impl ParsedConfig {
         })
     }
 
-    pub async fn into_configfile(self, client: Client) -> ConfigFile {
+    pub async fn into_configfile(self, client: ClientWithMiddleware) -> ConfigFile {
         let mut packages = self.packages.into_package_list(client).await.unwrap();
         for mut p in &mut packages {
             p.indirect = false
         }
-        ConfigFile { packages: packages }
+        ConfigFile { packages }
     }
 }
 
@@ -80,7 +80,7 @@ impl ConfigFile {
 
     /// Creates a new [ConfigFile] from the given text
     /// Panics if the file cant be parsed as toml, hjson or yaml.
-    pub async fn new(contents: &String, client: Client) -> Self {
+    pub async fn new(contents: &String, client: ClientWithMiddleware) -> Self {
         if contents.is_empty() {
             panic!("Empty CFG");
         }
@@ -118,7 +118,7 @@ impl ConfigFile {
         cfg
     }
 
-    pub async fn parse(txt: &str, t: ConfigType, client: Client) -> Result<Self> {
+    pub async fn parse(txt: &str, t: ConfigType, client: ClientWithMiddleware) -> Result<Self> {
         Ok(ParsedConfig::parse(txt, t)?.into_configfile(client).await)
     }
 
@@ -131,6 +131,7 @@ impl ConfigFile {
                 pkgs.push(p)
             };
         }
+        pkgs.sort();
         serde_json::to_string_pretty(&pkgs).unwrap()
     }
 
@@ -168,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn parse() {
         let _t = crate::test_utils::mktemp();
-        let c = Client::new();
+        let c = crate::mkclient();
         let cfgs: [&mut ConfigFile; 3] = [
             &mut ConfigFile::new(
                 &r#"dependencies: { "@bendn/test": 2.0.10 }"#.into(),
@@ -190,10 +191,9 @@ mod tests {
         struct LockFileEntry {
             pub name: String,
             pub version: String,
-            pub integrity: String,
         }
         let wanted_lockfile = serde_json::from_str::<Vec<LockFileEntry>>(
-            r#"[{"name":"@bendn/test","version":"2.0.10","integrity":"sha512-hyPGxDG8poa2ekmWr1BeTCUa7YaZYfhsN7jcLJ3q2cQVlowcTnzqmz4iV3t21QFyabE5R+rV+y6d5dAItrJeDw=="},{"name":"@bendn/gdcli","version":"1.2.5","integrity":"sha512-/YOAd1+K4JlKvPTmpX8B7VWxGtFrxKq4R0A6u5qOaaVPK6uGsl4dGZaIHpxuqcurEcwPEOabkoShXKZaOXB0lw=="}]"#,
+            r#"[{"name":"@bendn/gdcli","version":"1.2.5"},{"name":"@bendn/test","version":"2.0.10"}]"#,
         ).unwrap();
         for cfg in cfgs {
             assert_eq!(cfg.packages.len(), 1);

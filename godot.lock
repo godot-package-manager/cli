@@ -1,14 +1,22 @@
 [
   {
-    "name": "@bendn/test",
-    "integrity": "sha512-hyPGxDG8poa2ekmWr1BeTCUa7YaZYfhsN7jcLJ3q2cQVlowcTnzqmz4iV3t21QFyabE5R+rV+y6d5dAItrJeDw==",
-    "tarball": "https://registry.npmjs.org/@bendn/test/-/test-2.0.10.tgz",
-    "version": "2.0.10"
-  },
-  {
     "name": "@bendn/gdcli",
-    "integrity": "sha512-/YOAd1+K4JlKvPTmpX8B7VWxGtFrxKq4R0A6u5qOaaVPK6uGsl4dGZaIHpxuqcurEcwPEOabkoShXKZaOXB0lw==",
     "tarball": "https://registry.npmjs.org/@bendn/gdcli/-/gdcli-1.2.5.tgz",
     "version": "1.2.5"
+  },
+  {
+    "name": "@bendn/splitter",
+    "tarball": "https://registry.npmjs.org/@bendn/splitter/-/splitter-1.0.6.tgz",
+    "version": "1.0.6"
+  },
+  {
+    "name": "@bendn/stockfish.gd",
+    "tarball": "https://registry.npmjs.org/@bendn/stockfish.gd/-/stockfish.gd-1.2.6.tgz",
+    "version": "1.2.6"
+  },
+  {
+    "name": "@bendn/test",
+    "tarball": "https://registry.npmjs.org/@bendn/test/-/test-2.0.10.tgz",
+    "version": "2.0.10"
   }
 ]

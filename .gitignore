@@ -18,6 +18,3 @@ addons/
 
 # Performance data
 perf.data*
-
-# cache
-.gpm_cache

@@ -3,19 +3,18 @@ mod package;
 mod theme;
 mod verbosity;
 
-use crate::package::{parsing::IntoPackageList, Package};
+use config_file::{create_cache, Cache, ConfigFile, ConfigType};
+use package::parsing::{IntoPackageList, ParsedPackage};
+use package::Package;
+
 use anyhow::Result;
 use async_recursion::async_recursion;
 use clap::{ColorChoice, Parser, Subcommand, ValueEnum};
-use config_file::{ConfigFile, ConfigType};
 use console::{self, Term};
 use futures::stream::{self, StreamExt};
-use http_cache_reqwest::{CACacheManager, Cache, CacheMode, HttpCache};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressIterator};
 use lazy_static::lazy_static;
-use package::parsing::ParsedPackage;
-use reqwest::{header::HeaderMap, ClientBuilder as NormalClientBuilder};
-use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest::Client;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
@@ -90,6 +89,7 @@ Produces output like
         /// To print download urls next to the package name.
         print_tarballs: bool,
     },
+    /// Helpful initializer for the godot.package file.
     Init {
         #[arg(long = "packages", num_args = 0..)]
         packages: Vec<ParsedPackage>,
@@ -148,9 +148,11 @@ async fn main() {
         ColorChoice::Never => set_colors(false),
         ColorChoice::Auto => set_colors(Term::stdout().is_term() && Term::stderr().is_term()),
     }
-    async fn get_cfg(path: PathBuf, client: ClientWithMiddleware) -> ConfigFile {
+    let cache = create_cache();
+    let client = mkclient();
+    let mut cfg = {
         let mut contents = String::from("");
-        if path == Path::new("-") {
+        if args.config_file == Path::new("-") {
             let bytes = stdin()
                 .read_to_string(&mut contents)
                 .expect("Stdin read should be ok");
@@ -158,10 +160,10 @@ async fn main() {
                 panic!("Stdin should not be empty");
             };
         } else {
-            contents = read_to_string(path).expect("Reading config file should be ok");
+            contents = read_to_string(args.config_file).expect("Reading config file should be ok");
         };
-        ConfigFile::new(&contents, client).await
-    }
+        ConfigFile::new(&contents, client.clone(), cache.clone()).await
+    };
     fn lock(cfg: &mut ConfigFile, path: PathBuf) {
         let lockfile = cfg.lock();
         if path == Path::new("-") {
@@ -170,28 +172,15 @@ async fn main() {
             write(path, lockfile).expect("Writing lock file should be ok");
         }
     }
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "User-Agent",
-        format!(
-            "gpm/{} (godot-package-manager/cli on GitHub)",
-            env!("CARGO_PKG_VERSION")
-        )
-        .parse()
-        .unwrap(),
-    );
-    let client = mkclient();
     let _ = BEGIN.elapsed(); // needed to initialize the instant for whatever reason
     match args.action {
         Actions::Update => {
-            let c = &mut get_cfg(args.config_file, client.clone()).await;
-            update(c, true, args.verbosity, client.clone()).await;
-            lock(c, args.lock_file);
+            update(&mut cfg, true, args.verbosity, client.clone()).await;
+            lock(&mut cfg, args.lock_file);
         }
         Actions::Purge => {
-            let c = &mut get_cfg(args.config_file, client.clone()).await;
-            purge(c, args.verbosity);
-            lock(c, args.lock_file);
+            purge(&mut cfg, args.verbosity);
+            lock(&mut cfg, args.lock_file);
         }
         Actions::Tree {
             charset,
@@ -200,7 +189,7 @@ async fn main() {
         } => println!(
             "{}",
             tree(
-                &mut get_cfg(args.config_file, client.clone()).await, // no locking needed
+                &mut cfg, // no locking needed
                 charset,
                 prefix,
                 print_tarballs,
@@ -210,8 +199,12 @@ async fn main() {
         ),
         Actions::Init { packages } => {
             init(
-                packages.into_package_list(client.clone()).await.unwrap(),
+                packages
+                    .into_package_list(client.clone(), cache.clone())
+                    .await
+                    .expect("Failed to parse `init` packages"),
                 client,
+                cache,
             )
             .await
             .expect("Initializing cfg should be ok");
@@ -219,8 +212,8 @@ async fn main() {
     }
 }
 
-pub fn mkclient() -> ClientWithMiddleware {
-    let mut headers = HeaderMap::new();
+pub fn mkclient() -> Client {
+    let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "User-Agent",
         format!(
@@ -230,32 +223,13 @@ pub fn mkclient() -> ClientWithMiddleware {
         .parse()
         .unwrap(),
     );
-    let path = if Path::new(".import").is_dir() {
-        ".import/gpm_cache"
-    } else if Path::new(".godot").is_dir() {
-        ".godot/gpm_cache"
-    } else {
-        ".gpm_cache"
-    };
-    ClientBuilder::new(
-        NormalClientBuilder::new()
-            .default_headers(headers)
-            .build()
-            .unwrap(),
-    )
-    .with(Cache(HttpCache {
-        mode: CacheMode::Default,
-        manager: CACacheManager { path: path.into() },
-        options: None,
-    }))
-    .build()
+    Client::builder().default_headers(headers).build().unwrap()
 }
 
-async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: ClientWithMiddleware) {
+async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client) {
     if !Path::new("./addons/").exists() {
         create_dir("./addons/").expect("Should be able to create addons folder");
     }
-    #[rustfmt::skip]
     let packages = cfg.collect();
     if v.debug() {
         println!(
@@ -438,7 +412,7 @@ async fn tree(
     charset: CharSet,
     prefix: PrefixType,
     print_tarballs: bool,
-    client: ClientWithMiddleware,
+    client: Client,
 ) -> String {
     let mut tree: String = if let Ok(s) = current_dir() {
         format!("{}\n", s.to_string_lossy())
@@ -451,8 +425,8 @@ async fn tree(
         "",
         &mut tree,
         match charset {
-            CharSet::UTF8 => "├──", // believe it or not, these are quite unlike
-            CharSet::ASCII => "|--",      // its hard to tell, with ligatures enable
+            CharSet::UTF8 => "├──",  // believe it or not, these are quite unlike
+            CharSet::ASCII => "|--", // its hard to tell, with ligatures enable
         },
         match charset {
             CharSet::UTF8 => "└──",
@@ -478,7 +452,7 @@ async fn tree(
         print_tarballs: bool,
         depth: u32,
         count: &mut u64,
-        client: ClientWithMiddleware,
+        client: Client,
     ) {
         // the index is used to decide if the package is the last package,
         // so we can use a L instead of a T.
@@ -528,7 +502,7 @@ async fn tree(
     tree
 }
 
-async fn init(mut packages: Vec<Package>, client: ClientWithMiddleware) -> Result<()> {
+async fn init(mut packages: Vec<Package>, client: Client, cache: Cache) -> Result<()> {
     let mut c = ConfigFile::default();
     if packages.is_empty() {
         let mut has_asked = false;
@@ -545,7 +519,7 @@ async fn init(mut packages: Vec<Package>, client: ClientWithMiddleware) -> Resul
             has_asked = true;
             let p: ParsedPackage = putils::input("Package?")?;
             let p_name = p.to_string();
-            let res = p.into_package(client.clone()).await;
+            let res = p.into_package(client.clone(), cache.clone()).await;
             if let Err(e) = res {
                 putils::fail(format!("{p_name} could not be parsed: {e}").as_str())?;
                 just_failed = true;
@@ -639,9 +613,12 @@ mod test_utils {
 async fn gpm() {
     let _t = test_utils::mktemp();
     let c = mkclient();
-    let cfg_file =
-        &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into(), c.clone())
-            .await;
+    let cfg_file = &mut config_file::ConfigFile::new(
+        &r#"packages: {"@bendn/test":2.0.10}"#.into(),
+        c.clone(),
+        create_cache(),
+    )
+    .await;
     update(cfg_file, false, Verbosity::Verbose, c.clone()).await;
     assert_eq!(test_utils::hashd("addons").join("|"), "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329|8e77e3adf577d32c8bc98981f05d40b2eb303271da08bfa7e205d3f27e188bd7|a625595a71b159e33b3d1ee6c13bea9fc4372be426dd067186fe2e614ce76e3c|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c850a9300388d6da1566c12a389927c3353bf931c4d6ea59b02beb302aac03ea|d060936e5f1e8b1f705066ade6d8c6de90435a91c51f122905a322251a181a5c|d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5|d794f3cee783779f50f37a53e1d46d9ebbc5ee7b37c36d7b6ee717773b6955cd|e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87");
     purge(cfg_file, Verbosity::Verbose);

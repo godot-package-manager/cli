@@ -1,17 +1,25 @@
+use crate::ctx;
 use crate::package::parsing::IntoPackageList;
 use crate::package::Package;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use console::style;
-use reqwest_middleware::ClientWithMiddleware;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+pub type Cache = Arc<Mutex<HashMap<String, HashMap<String, Package>>>>;
 
 #[derive(Debug, Default, Clone)]
 /// The config file: parsed from godot.package, usually.
 /// Contains only a list of [Package]s, currently.
 pub struct ConfigFile {
     pub packages: Vec<Package>,
-    // hooks: there are no hooks now
+    pub cache: Cache, // hooks: there are no hooks now
+}
+
+pub fn create_cache() -> Cache {
+    Cache::new(Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -38,7 +46,7 @@ impl std::fmt::Display for ConfigType {
     }
 }
 
-impl From<ConfigFile> for ParsedConfig {
+impl<'a> From<ConfigFile> for ParsedConfig {
     fn from(from: ConfigFile) -> Self {
         Self {
             packages: from
@@ -59,12 +67,19 @@ impl ParsedConfig {
         })
     }
 
-    pub async fn into_configfile(self, client: ClientWithMiddleware) -> ConfigFile {
-        let mut packages = self.packages.into_package_list(client).await.unwrap();
+    pub async fn into_configfile(self, client: Client, cache: Cache) -> ConfigFile {
+        let mut packages = ctx!(
+            self.packages.into_package_list(client, cache.clone()).await,
+            "turning ParsedConfig into ConfigFile"
+        )
+        .unwrap();
         for mut p in &mut packages {
             p.indirect = false
         }
-        ConfigFile { packages }
+        ConfigFile {
+            packages,
+            cache: cache,
+        }
     }
 }
 
@@ -80,7 +95,7 @@ impl ConfigFile {
 
     /// Creates a new [ConfigFile] from the given text
     /// Panics if the file cant be parsed as toml, hjson or yaml.
-    pub async fn new(contents: &String, client: ClientWithMiddleware) -> Self {
+    pub async fn new(contents: &String, client: Client, cache: Cache) -> Self {
         if contents.is_empty() {
             panic!("Empty CFG");
         }
@@ -88,16 +103,16 @@ impl ConfigFile {
         // definetly not going to backfire
         let mut cfg = if contents.as_bytes()[0] == b'{' {
             // json gets brute forced first so this isnt really needed
-            Self::parse(contents, ConfigType::JSON, client)
+            Self::parse(contents, ConfigType::JSON, client, cache)
                 .await
                 .expect("Parsing CFG from JSON should work")
         } else if contents.len() > 3 && contents[..3] == *"---" {
-            Self::parse(contents, ConfigType::YAML, client)
+            Self::parse(contents, ConfigType::YAML, client, cache)
                 .await
                 .expect("Parsing CFG from YAML should work")
         } else {
             for i in [ConfigType::JSON, ConfigType::YAML, ConfigType::TOML].into_iter() {
-                let res = Self::parse(contents, i, client.clone()).await;
+                let res = Self::parse(contents, i, client.clone(), cache.clone()).await;
 
                 // im sure theres some kind of idiomatic rust way to do this that i dont know of
                 if res.is_ok() {
@@ -118,8 +133,10 @@ impl ConfigFile {
         cfg
     }
 
-    pub async fn parse(txt: &str, t: ConfigType, client: ClientWithMiddleware) -> Result<Self> {
-        Ok(ParsedConfig::parse(txt, t)?.into_configfile(client).await)
+    async fn parse(txt: &str, t: ConfigType, client: Client, cache: Cache) -> Result<ConfigFile> {
+        Ok(ParsedConfig::parse(txt, t)?
+            .into_configfile(client, cache)
+            .await)
     }
 
     /// Creates a lockfile for this config file.
@@ -170,20 +187,24 @@ mod tests {
     async fn parse() {
         let _t = crate::test_utils::mktemp();
         let c = crate::mkclient();
+        let cache = create_cache();
         let cfgs: [&mut ConfigFile; 3] = [
             &mut ConfigFile::new(
                 &r#"dependencies: { "@bendn/test": 2.0.10 }"#.into(),
                 c.clone(),
+                cache.clone(),
             )
-            .await, // quoteless fails as a result of https://github.com/Canop/deser-hjson/issues/9
+            .await,
             &mut ConfigFile::new(
-                &"dependencies:\n  \"@bendn/test\": 2.0.10".into(),
+                &"dependencies:\n  \"@bendn/test\": \"2.0.10\"".into(),
                 c.clone(),
+                cache.clone(),
             )
             .await,
             &mut ConfigFile::new(
                 &"[dependencies]\n\"@bendn/test\" = \"2.0.10\"".into(),
                 c.clone(),
+                cache.clone(),
             )
             .await,
         ];

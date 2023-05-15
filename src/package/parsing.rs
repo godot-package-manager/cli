@@ -1,8 +1,9 @@
+use crate::config_file::Cache;
 use crate::package::{Manifest, Package};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use reqwest_middleware::ClientWithMiddleware;
+use reqwest::Client;
 use semver_rs::Version;
 use serde::Deserialize;
 use std::{collections::HashMap, fmt};
@@ -36,10 +37,10 @@ impl fmt::Display for VersionType {
 
 impl ParsedPackage {
     /// Turn into a [Package].
-    pub async fn into_package(self, client: ClientWithMiddleware) -> Result<Package> {
+    pub async fn into_package(self, client: Client, cache: Cache) -> Result<Package> {
         match self.version {
-            VersionType::Normal(v) => Package::new(self.name, v, client).await,
-            VersionType::Latest => Package::new_no_version(self.name, client).await,
+            VersionType::Normal(v) => Package::new(self.name, v, client, cache).await,
+            VersionType::Latest => Package::new_no_version(self.name, client, cache).await,
         }
     }
 }
@@ -112,12 +113,18 @@ impl std::str::FromStr for ParsedPackage {
     }
 }
 
-#[derive(Clone, Default, Debug, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct ParsedManifest {
     pub dist: ParsedManifestDist,
     #[serde(default)]
     pub dependencies: HashMap<String, String>,
     pub version: String,
+}
+
+impl fmt::Debug for ParsedManifest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ParsedManifest<{:?}>", self.dependencies)
+    }
 }
 
 #[derive(Clone, Default, Debug, Deserialize)]
@@ -127,12 +134,12 @@ pub struct ParsedManifestDist {
 }
 
 impl ParsedManifest {
-    pub async fn into_manifest(self, client: ClientWithMiddleware) -> Result<Manifest> {
+    pub async fn into_manifest(self, client: Client, cache: Cache) -> Result<Manifest> {
         Ok(Manifest {
             shasum: self.dist.shasum,
             tarball: self.dist.tarball,
             version: Version::new(&self.version).parse()?,
-            dependencies: self.dependencies.into_package_list(client).await?,
+            dependencies: self.dependencies.into_package_list(client, cache).await?,
         })
     }
 }
@@ -162,44 +169,40 @@ impl From<ParsedPackument> for Packument {
 
 #[async_trait]
 pub trait IntoPackageList {
-    async fn into_package_list(self, client: ClientWithMiddleware) -> Result<Vec<Package>>;
+    async fn into_package_list(self, client: Client, cache: Cache) -> Result<Vec<Package>>;
 }
 
 #[async_trait]
 impl IntoPackageList for HashMap<String, String> {
-    async fn into_package_list(self, client: ClientWithMiddleware) -> Result<Vec<Package>> {
-        let buf = stream::iter(self.into_iter())
+    async fn into_package_list(self, client: Client, cache: Cache) -> Result<Vec<Package>> {
+        stream::iter(self.into_iter())
             .map(|(name, version)| async {
                 let client = client.clone();
-                async move { Package::new(name, version, client).await }.await
+                let cache = cache.clone();
+                async move { Package::new(name.clone(), version.clone(), client, cache).await }
+                    .await
             })
-            .buffer_unordered(crate::PARALLEL);
-        let mut packages = vec![];
-        for p in buf.collect::<Vec<Result<Package>>>().await {
-            let mut p = p?;
-            p.indirect = true;
-            packages.push(p);
-        }
-        Ok(packages)
+            .buffer_unordered(crate::PARALLEL)
+            .collect::<Vec<Result<Package>>>()
+            .await
+            .into_iter()
+            .collect()
     }
 }
 
 #[async_trait]
 impl IntoPackageList for Vec<ParsedPackage> {
-    /// Fake result implementation
-    async fn into_package_list(self, client: ClientWithMiddleware) -> Result<Vec<Package>> {
-        let buf = stream::iter(self.into_iter())
+    async fn into_package_list(self, client: Client, cache: Cache) -> Result<Vec<Package>> {
+        stream::iter(self.into_iter())
             .map(|pp| async {
                 let client = client.clone();
-                async move {
-                    let name = pp.to_string();
-                    pp.into_package(client)
-                        .await
-                        .unwrap_or_else(|_| panic!("Package {name} could not be parsed"))
-                }
-                .await
+                let cache = cache.clone();
+                async move { pp.into_package(client, cache).await }.await
             })
-            .buffer_unordered(4);
-        Ok(buf.collect::<Vec<Package>>().await)
+            .buffer_unordered(crate::PARALLEL)
+            .collect::<Vec<Result<Package>>>()
+            .await
+            .into_iter()
+            .collect()
     }
 }

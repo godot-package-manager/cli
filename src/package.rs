@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
-use reqwest_middleware::ClientWithMiddleware;
+use reqwest::Client;
 use semver_rs::{Parseable, Range, Version};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
@@ -15,11 +15,13 @@ use tar::{Archive, EntryType::Directory};
 pub mod parsing;
 use parsing::*;
 
+use crate::config_file::Cache;
+
 const REGISTRY: &str = "https://registry.npmjs.org";
 
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Serialize, Debug)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Serialize, Hash)]
 /// The package struct.
-/// This struct is the powerhouse of the entire system, and manages
+/// This struct powers the entire system, and manages
 /// - installation
 /// - modification (of the loads, so they load the right stuff)
 /// - removal
@@ -35,7 +37,7 @@ pub struct Package {
     pub _lockfile_version_string: String, // for lockfile, do not use
 }
 
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Debug, Serialize)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Debug, Serialize, Hash)]
 pub struct Manifest {
     #[serde(skip)]
     pub shasum: String,
@@ -44,6 +46,13 @@ pub struct Manifest {
     pub dependencies: Vec<Package>,
     #[serde(skip)]
     version: Version,
+}
+
+#[macro_export]
+macro_rules! ctx {
+    ($e:expr, $fmt:literal $(, $args:expr)* $(,)?) => {
+        $e.with_context(||format!($fmt $(, $args)*))
+    };
 }
 
 macro_rules! abbreviated_get {
@@ -73,34 +82,54 @@ impl Package {
     }
 
     /// Creates a new [Package] from a name and version.
-    /// Makes network calls to get the manifest (which makes network calls to get dependency manifests)
-    pub async fn new(name: String, version: String, client: ClientWithMiddleware) -> Result<Self> {
+    /// Makes network calls to get the manifest (which makes network calls to get dependency manifests) (unless cached)
+    pub async fn new(name: String, version: String, client: Client, cache: Cache) -> Result<Self> {
         let version = version.trim();
         if version.is_empty() {
-            return Self::new_no_version(name, client).await;
+            // i forgot what this is for
+            return Self::new_no_version(name, client, cache).await;
         }
-        let r = Range::new(version)
-            .parse()
-            .with_context(|| format!("parsing version range {version} for {name}"))?; // this does ~ and ^  and >= and < and || e.q parsing
-        let packument = Self::get_packument(client.clone(), name.clone())
-            .await
-            .context(format!("getting packument for {name}"))?;
+        let r = ctx!(
+            Range::new(version).parse(),
+            "parsing version range {version} for {name}"
+        )?; // this does ~ and ^  and >= and < and || e.q parsing
+        if let Some(versions) = cache.lock().unwrap().get(&name) {
+            for (_, package) in versions {
+                if r.test(&package.version) {
+                    return Ok(package.clone());
+                }
+            }
+        }
+        let packument = ctx!(
+            Self::get_packument(client.clone(), &name).await,
+            "getting packument for {name}"
+        )?;
         let mut versions = Vec::with_capacity(packument.versions.len());
         for v in packument.versions {
             versions.push(v.version.clone());
-            let version = Version::parse(&v.version, None)
-                .with_context(|| format!("parsing version from packument of {name}"))?;
-            let vlone = v.clone();
+            let version = ctx!(
+                Version::parse(&v.version, None),
+                "parsing version from packument of {name}"
+            )?;
+            let vlone = v.clone(); // purely for the print
             if r.test(&version) {
-                return Ok(Self {
+                let p = Package {
                     _lockfile_version_string: v.version.to_string(),
                     version,
-                    manifest: v.into_manifest(client).await.with_context(|| {
-                        format!("parsing {vlone:?} into Manifest for package {name}")
-                    })?,
-                    name,
+                    manifest: ctx!(
+                        v.clone().into_manifest(client, cache.clone()).await,
+                        "parsing {vlone:?} into Manifest for package {name}"
+                    )?,
+                    name: name.clone(),
                     ..Default::default()
-                });
+                };
+                cache
+                    .lock()
+                    .unwrap()
+                    .entry(name)
+                    .or_default()
+                    .insert(v.version.to_string(), p.clone());
+                return Ok(p);
             };
         }
 
@@ -109,15 +138,21 @@ impl Package {
 
     /// Create a package from a [str]. see also [ParsedPackage].
     #[allow(dead_code)] // used for tests
-    pub async fn create_from_str(s: &str, client: ClientWithMiddleware) -> Result<Package> {
+    pub async fn create_from_str(s: &str, client: Client, cache: Cache) -> Result<Package> {
         ParsedPackage::from_str(s)
             .unwrap()
-            .into_package(client)
+            .into_package(client, cache)
             .await
     }
 
     /// Creates a new [Package] from a name, gets the latest version from registry/name.
-    pub async fn new_no_version(name: String, client: ClientWithMiddleware) -> Result<Package> {
+    pub async fn new_no_version(name: String, client: Client, cache: Cache) -> Result<Package> {
+        const MARKER: &str = "🐢"; // latest
+        if let Some(versions) = cache.lock().unwrap().get_mut(&name) {
+            if let Some(marker) = versions.get(MARKER) {
+                return Ok(marker.clone());
+            }
+        }
         let resp = abbreviated_get!(format!("{REGISTRY}/{name}/latest"), client.clone())?
             .text()
             .await?;
@@ -125,15 +160,22 @@ impl Package {
             return Err(anyhow!("Package {name} was not found"));
         };
         let resp = serde_json::from_str::<ParsedManifest>(&resp)?
-            .into_manifest(client.clone())
+            .into_manifest(client.clone(), cache.clone())
             .await?;
-        Ok(Package {
-            name,
+        let latest = Package {
+            name: name.to_owned(),
             _lockfile_version_string: resp.version.to_string(),
             version: resp.version.clone(),
             manifest: resp,
             ..Default::default()
-        })
+        };
+        cache
+            .lock()
+            .unwrap()
+            .entry(name)
+            .or_default()
+            .insert(MARKER.to_owned(), latest.clone());
+        Ok(latest)
     }
 
     /// Returns wether this package is installed.
@@ -150,7 +192,7 @@ impl Package {
 
     /// Installs this [Package] to a download directory,
     /// depending on wether this package is a direct dependency or not.
-    pub async fn download(&mut self, client: ClientWithMiddleware) {
+    pub async fn download(&mut self, client: Client) {
         self.purge();
         let bytes = get!(&self.manifest.tarball, client)
             .expect("Tarball download should work")
@@ -161,7 +203,6 @@ impl Package {
 
         let mut hasher = Sha1::new();
         hasher.update(&bytes);
-        const ERR: &str = "Tarball shasum should be a valid hex string";
         assert_eq!(
             &self.manifest.shasum,
             &format!("{:x}", hasher.finalize()),
@@ -216,7 +257,7 @@ impl Package {
         .expect("Tarball should unpack");
     }
 
-    pub async fn get_packument(client: ClientWithMiddleware, name: String) -> Result<Packument> {
+    pub async fn get_packument(client: Client, name: &str) -> Result<Packument> {
         let resp = abbreviated_get!(&format!("{REGISTRY}/{name}"), client.clone())?
             .text()
             .await
@@ -224,9 +265,11 @@ impl Package {
         if resp == "\"Not Found\"" {
             return Err(anyhow!("Package {name} was not found",));
         };
-        Ok(serde_json::from_str::<ParsedPackument>(&resp)
-            .with_context(|| format!("parsing packument from {REGISTRY}/{name}"))?
-            .into())
+        Ok(ctx!(
+            serde_json::from_str::<ParsedPackument>(&resp),
+            "parsing packument from {REGISTRY}/{name}"
+        )?
+        .into())
     }
 
     /// Returns the download directory for this package depending on wether it is indirect or not.
@@ -415,15 +458,22 @@ impl fmt::Display for Package {
     }
 }
 
+impl fmt::Debug for Package {
+    /// Mirrors the [Display] impl.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::package::*;
+    use crate::{config_file::create_cache, package::*};
 
     #[tokio::test]
     async fn download() {
         let _t = crate::test_utils::mktemp();
         let c = crate::mkclient();
-        let mut p = Package::create_from_str("@bendn/test:2.0.10", c.clone())
+        let mut p = Package::create_from_str("@bendn/test:2.0.10", c.clone(), create_cache())
             .await
             .unwrap();
         p.download(c.clone()).await;
@@ -443,7 +493,7 @@ mod tests {
     async fn dep_map() {
         // no fs was touched in the making of this test
         assert_eq!(
-            Package::create_from_str("@bendn/test@2.0.10", crate::mkclient())
+            Package::create_from_str("@bendn/test@2.0.10", crate::mkclient(), create_cache())
                 .await
                 .unwrap()
                 .dep_map()
@@ -467,7 +517,7 @@ mod tests {
     async fn modify_load() {
         let _t = crate::test_utils::mktemp();
         let c = crate::mkclient();
-        let mut p = Package::create_from_str("@bendn/test=2.0.10", c.clone())
+        let mut p = Package::create_from_str("@bendn/test=2.0.10", c.clone(), create_cache())
             .await
             .unwrap();
         let dep_map = &p.dep_map().unwrap();

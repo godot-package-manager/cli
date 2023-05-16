@@ -137,7 +137,7 @@ impl Package {
             "parsing version range {version} for {name}"
         )?; // this does ~ and ^  and >= and < and || e.q parsing
         if let Some(versions) = cache.lock().unwrap().get(&name) {
-            for (_, package) in versions {
+            for package in versions.values() {
                 if r.test(&package.version) {
                     return Ok(package.clone());
                 }
@@ -176,7 +176,7 @@ impl Package {
             };
         }
 
-        return Err(anyhow!("Failed to match version for package {name} matching {version}. Tried versions: {versions:?}"));
+        Err(anyhow!("Failed to match version for package {name} matching {version}. Tried versions: {versions:?}"))
     }
 
     /// Create a package from a [str]. see also [ParsedPackage].

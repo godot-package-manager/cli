@@ -343,10 +343,10 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client
 /// dir 1 and 2 will be deleted.
 /// Run multiple times to delete `dir0`.
 fn recursive_delete_empty(dir: &Path, cwd: &Path) -> std::io::Result<()> {
-    if read_dir(cwd.join(&dir))?.next().is_none() {
+    if read_dir(cwd.join(dir))?.next().is_none() {
         return remove_dir(cwd.join(dir));
     }
-    for p in read_dir(&dir)?.filter_map(|e| {
+    for p in read_dir(dir)?.filter_map(|e| {
         let e = e.ok()?;
         e.file_type().ok()?.is_dir().then_some(e)
     }) {
@@ -395,7 +395,7 @@ fn purge(cfg: &mut ConfigFile, v: Verbosity, cwd: &Path) {
 
     // run multiple times because the algorithm goes from top to bottom, stupidly.
     for _ in 0..3 {
-        if let Err(e) = recursive_delete_empty(&cwd.join("addons"), &cwd) {
+        if let Err(e) = recursive_delete_empty(&cwd.join("addons"), cwd) {
             eprintln!("{e}")
         }
     }
@@ -596,7 +596,6 @@ mod test_utils {
     pub fn hashd(d: &Path) -> Vec<String> {
         let mut files = glob(format!("{}/**/*", d.display()).as_str())
             .unwrap()
-            .into_iter()
             .filter_map(|s| {
                 let p = &s.unwrap();
                 p.is_file().then(|| {

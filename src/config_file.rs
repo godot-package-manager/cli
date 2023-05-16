@@ -47,7 +47,7 @@ impl std::fmt::Display for ConfigType {
     }
 }
 
-impl<'a> From<ConfigFile> for ParsedConfig {
+impl From<ConfigFile> for ParsedConfig {
     fn from(from: ConfigFile) -> Self {
         Self {
             packages: from
@@ -77,10 +77,7 @@ impl ParsedConfig {
         for mut p in &mut packages {
             p.indirect = false
         }
-        ConfigFile {
-            packages,
-            cache: cache,
-        }
+        ConfigFile { packages, cache }
     }
 }
 

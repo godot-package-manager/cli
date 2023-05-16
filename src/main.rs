@@ -15,6 +15,7 @@ use futures::stream::{self, StreamExt};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressIterator};
 use lazy_static::lazy_static;
 use reqwest::Client;
+use std::collections::HashSet;
 use std::fs::{create_dir, read_dir, read_to_string, remove_dir, write};
 use std::io::{stdin, Read};
 use std::path::{Path, PathBuf};
@@ -268,7 +269,7 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client
     let bar_or_info = v.bar() || v.info();
     let (tx, rx) = bar_or_info.then(channel).unzip();
     let buf = stream::iter(packages)
-        .map(|mut p| async {
+        .map(|mut p| {
             let p_name = p.to_string();
             let tx = if bar_or_info { tx.clone() } else { None };
             let client = client.clone();
@@ -287,7 +288,6 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client
                     tx.unwrap().send(Status::Finished(p_name.clone())).unwrap();
                 }
             }
-            .await;
         })
         .buffer_unordered(PARALLEL);
     // use to test the difference in speed
@@ -354,11 +354,12 @@ fn recursive_delete_empty(dir: String) -> std::io::Result<()> {
 }
 
 fn purge(cfg: &mut ConfigFile, v: Verbosity) {
-    let packages = cfg
-        .collect()
-        .into_iter()
-        .filter(|p| p.is_installed())
-        .collect::<Vec<Package>>();
+    let mut packages = HashSet::new();
+    cfg.for_each(|p| {
+        if p.is_installed() {
+            packages.insert(p.clone());
+        }
+    });
     if packages.is_empty() {
         if cfg.packages.is_empty() {
             panic!("No packages configured (modify the \"godot.package\" file to add packages)")

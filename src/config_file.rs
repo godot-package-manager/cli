@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use console::style;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 pub type Cache = Arc<Mutex<HashMap<String, HashMap<String, Package>>>>;
@@ -172,9 +172,11 @@ impl ConfigFile {
 
     /// Collect all the packages, and their dependencys.
     /// Uses clones, because I wasn't able to get references to work
-    pub fn collect(&mut self) -> Vec<Package> {
-        let mut pkgs: Vec<Package> = vec![];
-        self.for_each(|p| pkgs.push(p.clone()));
+    pub fn collect(&mut self) -> HashSet<Package> {
+        let mut pkgs: HashSet<Package> = HashSet::new();
+        self.for_each(|p| {
+            pkgs.insert(p.clone());
+        });
         pkgs
     }
 }

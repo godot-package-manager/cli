@@ -1,6 +1,6 @@
 [package]
 name = "godot-package-manager"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2021"
 authors = ["bendn <bend.n@outlook.com>"]
 description = "A package manager for godot"

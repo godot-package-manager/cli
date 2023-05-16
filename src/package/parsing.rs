@@ -157,7 +157,7 @@ impl From<ParsedPackument> for Packument {
     fn from(val: ParsedPackument) -> Self {
         let mut versions: Vec<ParsedManifest> = val.versions.into_values().collect();
         // sort newest first (really badly)
-        versions.sort_by(|a, b| {
+        versions.sort_unstable_by(|a, b| {
             Version::new(&b.version)
                 .parse()
                 .unwrap()

@@ -165,8 +165,8 @@ async fn main() {
         };
         ConfigFile::new(&contents, client.clone(), cache.clone()).await
     };
-    fn lock(cfg: &mut ConfigFile, path: PathBuf) {
-        let lockfile = cfg.lock();
+    fn lock(cfg: &mut ConfigFile, path: PathBuf, cwd: &Path) {
+        let lockfile = cfg.lock(cwd);
         if path == Path::new("-") {
             println!("{lockfile}");
         } else {
@@ -174,14 +174,15 @@ async fn main() {
         }
     }
     let _ = BEGIN.elapsed(); // needed to initialize the instant for whatever reason
+    let cwd = current_dir().expect("Should be able to read cwd");
     match args.action {
         Actions::Update => {
-            update(&mut cfg, true, args.verbosity, client.clone()).await;
-            lock(&mut cfg, args.lock_file);
+            update(&mut cfg, true, args.verbosity, client.clone(), &cwd).await;
+            lock(&mut cfg, args.lock_file, &cwd);
         }
         Actions::Purge => {
-            purge(&mut cfg, args.verbosity);
-            lock(&mut cfg, args.lock_file);
+            purge(&mut cfg, args.verbosity, &cwd);
+            lock(&mut cfg, args.lock_file, &cwd);
         }
         Actions::Tree {
             charset,
@@ -206,6 +207,7 @@ async fn main() {
                     .expect("Failed to parse `init` packages"),
                 client,
                 cache,
+                &cwd,
             )
             .await
             .expect("Initializing cfg should be ok");
@@ -227,9 +229,9 @@ pub fn mkclient() -> Client {
     Client::builder().default_headers(headers).build().unwrap()
 }
 
-async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client) {
-    if !Path::new("./addons/").exists() {
-        create_dir("./addons/").expect("Should be able to create addons folder");
+async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client, cwd: &Path) {
+    if !cwd.join("addons").exists() {
+        create_dir(cwd.join("addons")).expect("Should be able to create addons folder");
     }
     let packages = cfg.collect();
     if v.debug() {
@@ -280,9 +282,9 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client
                         .send(Status::Processing(p_name.clone()))
                         .unwrap();
                 }
-                p.download(client).await;
+                p.download(client, cwd).await;
                 if modify {
-                    p.modify();
+                    p.modify(cwd);
                 };
                 if bar_or_info {
                     tx.unwrap().send(Status::Finished(p_name.clone())).unwrap();
@@ -340,23 +342,23 @@ async fn update(cfg: &mut ConfigFile, modify: bool, v: Verbosity, client: Client
 /// ```
 /// dir 1 and 2 will be deleted.
 /// Run multiple times to delete `dir0`.
-fn recursive_delete_empty(dir: String) -> std::io::Result<()> {
-    if read_dir(&dir)?.next().is_none() {
-        return remove_dir(dir);
+fn recursive_delete_empty(dir: &Path, cwd: &Path) -> std::io::Result<()> {
+    if read_dir(cwd.join(dir))?.next().is_none() {
+        return remove_dir(cwd.join(dir));
     }
-    for p in read_dir(&dir)?.filter_map(|e| {
+    for p in read_dir(dir)?.filter_map(|e| {
         let e = e.ok()?;
         e.file_type().ok()?.is_dir().then_some(e)
     }) {
-        recursive_delete_empty(format!("{dir}/{}", p.file_name().to_string_lossy()))?;
+        recursive_delete_empty(&cwd.join(dir).join(p.path()), cwd)?;
     }
     Ok(())
 }
 
-fn purge(cfg: &mut ConfigFile, v: Verbosity) {
+fn purge(cfg: &mut ConfigFile, v: Verbosity, cwd: &Path) {
     let mut packages = HashSet::new();
     cfg.for_each(|p| {
-        if p.is_installed() {
+        if p.is_installed(cwd) {
             packages.insert(p.clone());
         }
     });
@@ -385,16 +387,16 @@ fn purge(cfg: &mut ConfigFile, v: Verbosity) {
                 bar.println(format!(
                     "{:>12} {p} ({})",
                     putils::green("Deleting"),
-                    p.download_dir(),
+                    p.download_dir(cwd).strip_prefix(cwd).unwrap().display(),
                 ));
             }
-            p.purge()
+            p.purge(cwd)
         });
 
     // run multiple times because the algorithm goes from top to bottom, stupidly.
     for _ in 0..3 {
-        if let Err(e) = recursive_delete_empty("./addons".to_string()) {
-            eprintln!("Unable to remove empty directorys: {e}")
+        if let Err(e) = recursive_delete_empty(&cwd.join("addons"), cwd) {
+            eprintln!("{e}")
         }
     }
     if v.info() {
@@ -503,7 +505,7 @@ async fn tree(
     tree
 }
 
-async fn init(mut packages: Vec<Package>, client: Client, cache: Cache) -> Result<()> {
+async fn init(mut packages: Vec<Package>, client: Client, cache: Cache, cwd: &Path) -> Result<()> {
     let mut c = ConfigFile::default();
     if packages.is_empty() {
         let mut has_asked = false;
@@ -572,7 +574,7 @@ async fn init(mut packages: Vec<Package>, client: Client, cache: Cache) -> Resul
     if !c.packages.is_empty()
         && putils::confirm("Would you like to install your new packages?", true)?
     {
-        update(&mut c, true, Verbosity::Normal, client.clone()).await;
+        update(&mut c, true, Verbosity::Normal, client.clone(), cwd).await;
     };
     println!("Goodbye!");
     Ok(())
@@ -582,20 +584,18 @@ async fn init(mut packages: Vec<Package>, client: Client, cache: Cache) -> Resul
 mod test_utils {
     use glob::glob;
     use sha2::{Digest, Sha256};
-    use std::{env::set_current_dir, fs::create_dir, fs::read};
-    use tempdir::TempDir;
+    use std::{fs::create_dir, fs::read, path::Path};
+    use tempfile::TempDir;
 
     pub fn mktemp() -> TempDir {
-        let tmp_dir = TempDir::new("gpm-tests").unwrap();
-        set_current_dir(tmp_dir.path()).unwrap();
-        create_dir("addons").unwrap();
+        let tmp_dir = TempDir::new().unwrap();
+        create_dir(tmp_dir.path().join("addons")).unwrap();
         tmp_dir
     }
 
-    pub fn hashd(d: &str) -> Vec<String> {
-        let mut files = glob(format!("{}/**/*", d).as_str())
+    pub fn hashd(d: &Path) -> Vec<String> {
+        let mut files = glob(format!("{}/**/*", d.display()).as_str())
             .unwrap()
-            .into_iter()
             .filter_map(|s| {
                 let p = &s.unwrap();
                 p.is_file().then(|| {
@@ -612,7 +612,7 @@ mod test_utils {
 
 #[tokio::test]
 async fn gpm() {
-    let _t = test_utils::mktemp();
+    let t = test_utils::mktemp();
     let c = mkclient();
     let cfg_file = &mut config_file::ConfigFile::new(
         &r#"packages: {"@bendn/test":2.0.10}"#.into(),
@@ -620,10 +620,13 @@ async fn gpm() {
         create_cache(),
     )
     .await;
-    update(cfg_file, false, Verbosity::Verbose, c.clone()).await;
-    assert_eq!(test_utils::hashd("addons").join("|"), "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329|8e77e3adf577d32c8bc98981f05d40b2eb303271da08bfa7e205d3f27e188bd7|a625595a71b159e33b3d1ee6c13bea9fc4372be426dd067186fe2e614ce76e3c|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c850a9300388d6da1566c12a389927c3353bf931c4d6ea59b02beb302aac03ea|d060936e5f1e8b1f705066ade6d8c6de90435a91c51f122905a322251a181a5c|d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5|d794f3cee783779f50f37a53e1d46d9ebbc5ee7b37c36d7b6ee717773b6955cd|e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87");
-    purge(cfg_file, Verbosity::Verbose);
-    assert_eq!(test_utils::hashd("addons"), vec![] as Vec<String>);
+    update(cfg_file, false, Verbosity::Verbose, c.clone(), t.path()).await;
+    assert_eq!(test_utils::hashd(&t.path().join("addons")).join("|"), "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329|8e77e3adf577d32c8bc98981f05d40b2eb303271da08bfa7e205d3f27e188bd7|a625595a71b159e33b3d1ee6c13bea9fc4372be426dd067186fe2e614ce76e3c|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c850a9300388d6da1566c12a389927c3353bf931c4d6ea59b02beb302aac03ea|d060936e5f1e8b1f705066ade6d8c6de90435a91c51f122905a322251a181a5c|d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5|d794f3cee783779f50f37a53e1d46d9ebbc5ee7b37c36d7b6ee717773b6955cd|e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87");
+    purge(cfg_file, Verbosity::Verbose, t.path());
+    assert_eq!(
+        test_utils::hashd(&t.path().join("addons")),
+        vec![] as Vec<String>
+    );
     assert_eq!(
         tree(
             cfg_file,

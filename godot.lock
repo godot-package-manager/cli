@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "name": "@bendn/gdcli",
+    "tarball": "https://registry.npmjs.org/@bendn/gdcli/-/gdcli-1.2.5.tgz",
+    "version": "1.2.5"
+  },
+  {
+    "name": "@bendn/splitter",
+    "tarball": "https://registry.npmjs.org/@bendn/splitter/-/splitter-1.0.6.tgz",
+    "version": "1.0.6"
+  },
+  {
+    "name": "@bendn/stockfish.gd",
+    "tarball": "https://registry.npmjs.org/@bendn/stockfish.gd/-/stockfish.gd-1.2.6.tgz",
+    "version": "1.2.6"
+  },
+  {
+    "name": "@bendn/test",
+    "tarball": "https://registry.npmjs.org/@bendn/test/-/test-2.0.10.tgz",
+    "version": "2.0.10"
+  }
+]

@@ -63,7 +63,7 @@ impl std::str::FromStr for ParsedPackage {
         }
         #[inline]
         fn safe(s: &str) -> bool {
-            s.find(&[
+            s.find([
                 ' ', '<', '>', '[', ']', '{', '}', '|', '\\', '^', '%', ':', '=',
             ])
             .is_none()
@@ -89,7 +89,7 @@ impl std::str::FromStr for ParsedPackage {
         }
         if s.contains(':') {
             // @bendn/gdcli:1.2.5
-            return split_p(s, ':');
+            split_p(s, ':')
         } else if s.contains('=') {
             // @bendn/gdcli=1.2.5
             return split_p(s, '=');
@@ -109,7 +109,7 @@ impl std::str::FromStr for ParsedPackage {
                 });
             }
             return split_p(s, '@');
-        };
+        }
     }
 }
 
@@ -181,11 +181,8 @@ impl IntoPackageList for HashMap<String, String> {
                 let cache = cache.clone();
                 async move {
                     let mut r = Package::new(name.clone(), version.clone(), client, cache).await;
-                    match &mut r {
-                        Ok(p) => {
-                            p.indirect = true;
-                        }
-                        _ => (),
+                    if let Ok(p) = &mut r {
+                        p.indirect = true;
                     }
                     r
                 }

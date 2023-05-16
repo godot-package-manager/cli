@@ -6,6 +6,7 @@ use console::style;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub type Cache = Arc<Mutex<HashMap<String, HashMap<String, Package>>>>;
@@ -46,7 +47,7 @@ impl std::fmt::Display for ConfigType {
     }
 }
 
-impl<'a> From<ConfigFile> for ParsedConfig {
+impl From<ConfigFile> for ParsedConfig {
     fn from(from: ConfigFile) -> Self {
         Self {
             packages: from
@@ -76,10 +77,7 @@ impl ParsedConfig {
         for mut p in &mut packages {
             p.indirect = false
         }
-        ConfigFile {
-            packages,
-            cache: cache,
-        }
+        ConfigFile { packages, cache }
     }
 }
 
@@ -141,10 +139,10 @@ impl ConfigFile {
 
     /// Creates a lockfile for this config file.
     /// note: Lockfiles are currently unused.
-    pub fn lock(&mut self) -> String {
+    pub fn lock(&mut self, cwd: &Path) -> String {
         let mut pkgs = vec![];
         for p in self.collect() {
-            if p.is_installed() {
+            if p.is_installed(cwd) {
                 pkgs.push(p)
             };
         }
@@ -187,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse() {
-        let _t = crate::test_utils::mktemp();
+        let t = crate::test_utils::mktemp();
         let c = crate::mkclient();
         let cache = create_cache();
         let cfgs: [&mut ConfigFile; 3] = [
@@ -227,10 +225,10 @@ mod tests {
                 "@bendn/gdcli@1.2.5"
             );
             for mut p in cfg.collect() {
-                p.download(c.clone()).await
+                p.download(c.clone(), t.path()).await
             }
             assert_eq!(
-                serde_json::from_str::<Vec<LockFileEntry>>(cfg.lock().as_str()).unwrap(),
+                serde_json::from_str::<Vec<LockFileEntry>>(cfg.lock(t.path()).as_str()).unwrap(),
                 wanted_lockfile
             );
         }

@@ -19,6 +19,8 @@ use crate::config_file::Cache;
 
 const REGISTRY: &str = "https://registry.npmjs.org";
 
+type DepMap = HashMap<String, PathBuf>;
+
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Serialize, Hash)]
 /// The package struct.
 /// This struct powers the entire system, and manages
@@ -74,6 +76,47 @@ macro_rules! get {
     };
 }
 
+/// Emulates `tar xzf archive --strip-components=1 --directory=P`.
+fn unpack<R>(mut archive: Archive<R>, dst: &Path) -> io::Result<()>
+where
+    R: io::Read,
+{
+    if dst.symlink_metadata().is_err() {
+        create_dir_all(dst)?;
+    }
+
+    let dst = &dst.canonicalize().unwrap_or(dst.to_path_buf());
+
+    // Delay any directory entries until the end (they will be created if needed by
+    // descendants), to ensure that directory permissions do not interfer with descendant
+    // extraction.
+    let mut directories = Vec::new();
+    for entry in archive.entries()? {
+        let entry = entry?;
+        let mut entry = (
+            dst.join(
+                entry
+                    .path()?
+                    .components()
+                    .skip(1)
+                    .filter(|c| matches!(c, Normal(_)))
+                    .collect::<PathBuf>(),
+            ),
+            entry,
+        );
+        if entry.1.header().entry_type() == Directory {
+            directories.push(entry);
+        } else {
+            create_dir_all(entry.0.parent().unwrap())?;
+            entry.1.unpack(entry.0)?;
+        }
+    }
+    for mut dir in directories {
+        dir.1.unpack(dir.0)?;
+    }
+    Ok(())
+}
+
 impl Package {
     #[inline]
     /// Does this package have dependencies?
@@ -94,7 +137,7 @@ impl Package {
             "parsing version range {version} for {name}"
         )?; // this does ~ and ^  and >= and < and || e.q parsing
         if let Some(versions) = cache.lock().unwrap().get(&name) {
-            for (_, package) in versions {
+            for package in versions.values() {
                 if r.test(&package.version) {
                     return Ok(package.clone());
                 }
@@ -133,7 +176,7 @@ impl Package {
             };
         }
 
-        return Err(anyhow!("Failed to match version for package {name} matching {version}. Tried versions: {versions:?}"));
+        Err(anyhow!("Failed to match version for package {name} matching {version}. Tried versions: {versions:?}"))
     }
 
     /// Create a package from a [str]. see also [ParsedPackage].
@@ -179,21 +222,21 @@ impl Package {
     }
 
     /// Returns wether this package is installed.
-    pub fn is_installed(&self) -> bool {
-        Path::new(&self.download_dir()).exists()
+    pub fn is_installed(&self, cwd: &Path) -> bool {
+        self.download_dir(cwd).exists()
     }
 
     /// Deletes this [Package].
-    pub fn purge(&self) {
-        if self.is_installed() {
-            remove_dir_all(self.download_dir()).expect("Should be able to remove download dir");
+    pub fn purge(&self, cwd: &Path) {
+        if self.is_installed(cwd) {
+            remove_dir_all(self.download_dir(cwd)).expect("Should be able to remove download dir");
         }
     }
 
     /// Installs this [Package] to a download directory,
     /// depending on wether this package is a direct dependency or not.
-    pub async fn download(&mut self, client: Client) {
-        self.purge();
+    pub async fn download(&mut self, client: Client, cwd: &Path) {
+        self.purge(cwd);
         let bytes = get!(&self.manifest.tarball, client)
             .expect("Tarball download should work")
             .bytes()
@@ -209,50 +252,9 @@ impl Package {
             "Tarball did not match checksum!"
         );
 
-        /// Emulates `tar xzf archive --strip-components=1 --directory=P`.
-        pub fn unpack<R>(mut archive: Archive<R>, dst: &Path) -> io::Result<()>
-        where
-            R: io::Read,
-        {
-            if dst.symlink_metadata().is_err() {
-                create_dir_all(dst)?;
-            }
-
-            let dst = &dst.canonicalize().unwrap_or(dst.to_path_buf());
-
-            // Delay any directory entries until the end (they will be created if needed by
-            // descendants), to ensure that directory permissions do not interfer with descendant
-            // extraction.
-            let mut directories = Vec::new();
-            for entry in archive.entries()? {
-                let entry = entry?;
-                let mut entry = (
-                    dst.join(
-                        entry
-                            .path()?
-                            .components()
-                            .skip(1)
-                            .filter(|c| matches!(c, Normal(_)))
-                            .collect::<PathBuf>(),
-                    ),
-                    entry,
-                );
-                if entry.1.header().entry_type() == Directory {
-                    directories.push(entry);
-                } else {
-                    create_dir_all(entry.0.parent().unwrap())?;
-                    entry.1.unpack(entry.0)?;
-                }
-            }
-            for mut dir in directories {
-                dir.1.unpack(dir.0)?;
-            }
-            Ok(())
-        }
-
         unpack(
             Archive::new(GzDecoder::new(&bytes[..])),
-            Path::new(&self.download_dir()),
+            &self.download_dir(cwd),
         )
         .expect("Tarball should unpack");
     }
@@ -273,22 +275,25 @@ impl Package {
     }
 
     /// Returns the download directory for this package depending on wether it is indirect or not.
-    pub fn download_dir(&self) -> String {
+    pub fn download_dir(&self, cwd: &Path) -> PathBuf {
         if self.indirect {
-            self.indirect_download_dir()
+            self.indirect_download_dir(cwd)
         } else {
-            self.direct_download_dir()
+            self.direct_download_dir(cwd)
         }
     }
 
     /// The download directory if this package is a direct dep.
-    fn direct_download_dir(&self) -> String {
-        format!("./addons/{}", self.name)
+    fn direct_download_dir(&self, cwd: &Path) -> PathBuf {
+        cwd.join("addons").join(self.name.clone())
     }
 
     /// The download directory if this package is a indirect dep.
-    fn indirect_download_dir(&self) -> String {
-        format!("./addons/__gpm_deps/{}/{}", self.name, self.version)
+    fn indirect_download_dir(&self, cwd: &Path) -> PathBuf {
+        cwd.join("addons")
+            .join("__gpm_deps")
+            .join(self.name.clone())
+            .join(self.version.to_string())
     }
 }
 
@@ -305,12 +310,7 @@ impl Package {
     /// # --snip--
     /// const Wow = preload("res://addons/__gpm_deps/my_awesome_addon/wow.gd")
     /// ```
-    fn modify_script_loads(
-        &self,
-        t: &str,
-        cwd: &Path,
-        dep_map: &HashMap<String, String>,
-    ) -> String {
+    fn modify_script_loads(&self, t: &str, cwd: &Path, dep_map: &DepMap) -> String {
         lazy_static::lazy_static! {
             static ref SCRIPT_LOAD_R: Regex = Regex::new("(pre)?load\\([\"']([^)]+)['\"]\\)").unwrap();
         }
@@ -339,8 +339,7 @@ impl Package {
     /// --snip--
     /// [ext_resource path="res://addons/__gpm_deps/my_awesome_addon/wow.gd" type="Script" id=1]
     /// ```
-    /// godot will automatically re-absolute-ify the path, but that is fine.
-    fn modify_tres_loads(&self, t: &str, cwd: &Path, dep_map: &HashMap<String, String>) -> String {
+    fn modify_tres_loads(&self, t: &str, cwd: &Path, dep_map: &DepMap) -> String {
         lazy_static::lazy_static! {
             static ref TRES_LOAD_R: Regex = Regex::new(r#"\[ext_resource path="([^"]+)""#).unwrap();
         }
@@ -363,7 +362,7 @@ impl Package {
     }
 
     /// The backend for modify_script_loads and modify_tres_loads.
-    fn modify_load(&self, path: &Path, cwd: &Path, dep_map: &HashMap<String, String>) -> PathBuf {
+    fn modify_load(&self, path: &Path, cwd: &Path, dep_map: &DepMap) -> PathBuf {
         // if it works, skip it
         if path.exists() || cwd.join(path).exists() {
             return path.to_path_buf();
@@ -383,7 +382,7 @@ impl Package {
     }
 
     /// Recursively modifies a directory.
-    fn recursive_modify(&self, dir: PathBuf, dep_map: &HashMap<String, String>) -> Result<()> {
+    fn recursive_modify(&self, dir: PathBuf, dep_map: &DepMap) -> Result<()> {
         for entry in read_dir(&dir)? {
             let p = entry?;
             if p.path().is_dir() {
@@ -417,14 +416,10 @@ impl Package {
         Ok(())
     }
 
-    fn dep_map(&mut self) -> Result<HashMap<String, String>> {
-        let mut dep_map = HashMap::<String, String>::new();
-        fn add(p: &Package, dep_map: &mut HashMap<String, String>) -> Result<()> {
-            let d = p
-                .download_dir()
-                .strip_prefix("./")
-                .ok_or(anyhow!("cant strip prefix!"))?
-                .to_string();
+    fn dep_map(&mut self, cwd: &Path) -> Result<DepMap> {
+        let mut dep_map = HashMap::<String, PathBuf>::new();
+        fn add(p: &Package, dep_map: &mut DepMap, cwd: &Path) -> Result<()> {
+            let d = p.download_dir(cwd);
             dep_map.insert(p.name.clone(), d.clone());
             // unscoped (@ben/cli => cli) (for compat)
             if let Some((_, s)) = p.name.split_once('/') {
@@ -433,21 +428,20 @@ impl Package {
             Ok(())
         }
         for pkg in &self.manifest.dependencies {
-            add(pkg, &mut dep_map)?;
+            add(pkg, &mut dep_map, cwd)?;
         }
-        add(self, &mut dep_map)?;
+        add(self, &mut dep_map, cwd)?;
         Ok(dep_map)
     }
 
     /// The catalyst for `recursive_modify`.
-    pub fn modify(&mut self) {
-        if !self.is_installed() {
+    pub fn modify(&mut self, cwd: &Path) {
+        if !self.is_installed(cwd) {
             panic!("Attempting to modify a package that is not installed");
         }
 
-        let map = &self.dep_map().unwrap();
-        self.recursive_modify(Path::new(&self.download_dir()).to_path_buf(), map)
-            .unwrap();
+        let map = &self.dep_map(cwd).unwrap();
+        self.recursive_modify(self.download_dir(cwd), map).unwrap();
     }
 }
 
@@ -471,14 +465,14 @@ mod tests {
 
     #[tokio::test]
     async fn download() {
-        let _t = crate::test_utils::mktemp();
+        let t = crate::test_utils::mktemp();
         let c = crate::mkclient();
         let mut p = Package::create_from_str("@bendn/test:2.0.10", c.clone(), create_cache())
             .await
             .unwrap();
-        p.download(c.clone()).await;
+        p.download(c.clone(), t.path()).await;
         assert_eq!(
-            crate::test_utils::hashd(p.download_dir().as_str()),
+            crate::test_utils::hashd(&p.download_dir(t.path())),
             [
                 "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329", // readme.md
                 "c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e", // sub1.gd
@@ -496,7 +490,7 @@ mod tests {
             Package::create_from_str("@bendn/test@2.0.10", crate::mkclient(), create_cache())
                 .await
                 .unwrap()
-                .dep_map()
+                .dep_map(Path::new(""))
                 .unwrap(),
             HashMap::from([
                 ("test".into(), "addons/@bendn/test".into()),
@@ -515,28 +509,33 @@ mod tests {
 
     #[tokio::test]
     async fn modify_load() {
-        let _t = crate::test_utils::mktemp();
+        let t = crate::test_utils::mktemp();
         let c = crate::mkclient();
         let mut p = Package::create_from_str("@bendn/test=2.0.10", c.clone(), create_cache())
             .await
             .unwrap();
-        let dep_map = &p.dep_map().unwrap();
-        let cwd = Path::new("addons/@bendn/test").into();
-        p.download(c).await;
+        let dep_map = &p.dep_map(t.path()).unwrap();
+        p.download(c, t.path()).await;
         p.indirect = false;
+        let cwd = t.path().join("addons/@bendn/test");
         assert_eq!(
-            p.modify_load(Path::new("addons/test/main.gd"), cwd, dep_map)
-                .to_str()
-                .unwrap(),
-            "addons/@bendn/test/main.gd"
+            Path::new(
+                p.modify_load(Path::new("addons/test/main.gd"), &cwd, dep_map)
+                    .to_str()
+                    .unwrap()
+            ),
+            t.path().join("addons/@bendn/test/main.gd")
         );
 
         // dependency usage test
         assert_eq!(
-            p.modify_load(Path::new("addons/gdcli/Parser.gd"), cwd, dep_map)
-                .to_str()
-                .unwrap(),
-            "addons/__gpm_deps/@bendn/gdcli/1.2.5/Parser.gd"
+            Path::new(
+                p.modify_load(Path::new("addons/gdcli/Parser.gd"), &cwd, dep_map)
+                    .to_str()
+                    .unwrap()
+            ),
+            t.path()
+                .join("addons/__gpm_deps/@bendn/gdcli/1.2.5/Parser.gd")
         )
     }
 }

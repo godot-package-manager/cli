@@ -1,7 +1,7 @@
+use crate::Client;
 use anyhow::{anyhow, Context, Result};
 use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
-use reqwest::Client;
 use semver_rs::{Parseable, Range, Version};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
@@ -16,8 +16,6 @@ pub mod parsing;
 use parsing::*;
 
 use crate::config_file::Cache;
-
-const REGISTRY: &str = "https://registry.npmjs.org";
 
 type DepMap = HashMap<String, PathBuf>;
 
@@ -57,22 +55,9 @@ macro_rules! ctx {
     };
 }
 
-macro_rules! abbreviated_get {
-    ($url: expr, $client: expr) => {
-        $client
-            .get($url)
-            .header(
-                "Accept",
-                "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8",
-            )
-            .send()
-            .await
-    };
-}
-
 macro_rules! get {
-    ($url: expr, $client: expr) => {
-        $client.get($url).send().await
+    ($client: expr, $fmt:literal $(, $args:expr)* $(,)?) => {
+        $client.get(&format!($fmt $(, $args)*)).send().await
     };
 }
 
@@ -196,7 +181,7 @@ impl Package {
                 return Ok(marker.clone());
             }
         }
-        let resp = abbreviated_get!(format!("{REGISTRY}/{name}/latest"), client.clone())?
+        let resp = get!(client.clone(), "{}/{name}/latest", client.registry)?
             .text()
             .await?;
         if resp == "\"Not Found\"" {
@@ -237,7 +222,7 @@ impl Package {
     /// depending on wether this package is a direct dependency or not.
     pub async fn download(&mut self, client: Client, cwd: &Path) {
         self.purge(cwd);
-        let bytes = get!(&self.manifest.tarball, client)
+        let bytes = get!(client.clone(), "{}", &self.manifest.tarball)
             .expect("Tarball download should work")
             .bytes()
             .await
@@ -251,7 +236,11 @@ impl Package {
             &format!("{:x}", hasher.finalize()),
             "Tarball did not match checksum!"
         );
-
+        // println!(
+        //     "(\"{}\", hex::decode(\"{}\").unwrap()),",
+        //     self.manifest.tarball.replace(&(client.registry + "/"), ""),
+        //     hex::encode(&bytes)
+        // );
         unpack(
             Archive::new(GzDecoder::new(&bytes[..])),
             &self.download_dir(cwd),
@@ -260,18 +249,28 @@ impl Package {
     }
 
     pub async fn get_packument(client: Client, name: &str) -> Result<Packument> {
-        let resp = abbreviated_get!(&format!("{REGISTRY}/{name}"), client.clone())?
-            .text()
-            .await
-            .with_context(|| format!("getting packument from {REGISTRY}/{name}"))?;
+        let resp = ctx!(
+            get!(client.clone(), "{}/{name}", client.registry)?
+                .text()
+                .await,
+            "getting packument from {}/{name}",
+            client.registry
+        )?;
         if resp == "\"Not Found\"" {
             return Err(anyhow!("Package {name} was not found",));
         };
-        Ok(ctx!(
+        let res = ctx!(
             serde_json::from_str::<ParsedPackument>(&resp),
-            "parsing packument from {REGISTRY}/{name}"
-        )?
-        .into())
+            "parsing packument from {}/{name}",
+            client.registry
+        )?;
+        // println!(
+        //     "(\"{name}\", r#\"{}\"#),",
+        //     serde_json::to_string(&res)
+        //         .unwrap()
+        //         .replace("https://registry.npmjs.org", "{REGISTRY}")
+        // );
+        Ok(res.into())
     }
 
     /// Returns the download directory for this package depending on wether it is indirect or not.
@@ -465,14 +464,14 @@ mod tests {
 
     #[tokio::test]
     async fn download() {
-        let t = crate::test_utils::mktemp();
-        let c = crate::mkclient();
+        let t = crate::test_utils::mktemp().await;
+        let c = t.2;
         let mut p = Package::create_from_str("@bendn/test:2.0.10", c.clone(), create_cache())
             .await
             .unwrap();
-        p.download(c.clone(), t.path()).await;
+        p.download(c.clone(), t.0.path()).await;
         assert_eq!(
-            crate::test_utils::hashd(&p.download_dir(t.path())),
+            crate::test_utils::hashd(&p.download_dir(t.0.path())),
             [
                 "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329", // readme.md
                 "c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e", // sub1.gd
@@ -486,12 +485,17 @@ mod tests {
     #[tokio::test]
     async fn dep_map() {
         // no fs was touched in the making of this test
+
         assert_eq!(
-            Package::create_from_str("@bendn/test@2.0.10", crate::mkclient(), create_cache())
-                .await
-                .unwrap()
-                .dep_map(Path::new(""))
-                .unwrap(),
+            Package::create_from_str(
+                "@bendn/test@2.0.10",
+                crate::test_utils::mktemp().await.2,
+                create_cache()
+            )
+            .await
+            .unwrap()
+            .dep_map(Path::new(""))
+            .unwrap(),
             HashMap::from([
                 ("test".into(), "addons/@bendn/test".into()),
                 ("@bendn/test".into(), "addons/@bendn/test".into()),
@@ -509,22 +513,22 @@ mod tests {
 
     #[tokio::test]
     async fn modify_load() {
-        let t = crate::test_utils::mktemp();
-        let c = crate::mkclient();
+        let t = crate::test_utils::mktemp().await;
+        let c = t.2;
         let mut p = Package::create_from_str("@bendn/test=2.0.10", c.clone(), create_cache())
             .await
             .unwrap();
-        let dep_map = &p.dep_map(t.path()).unwrap();
-        p.download(c, t.path()).await;
+        let dep_map = &p.dep_map(t.0.path()).unwrap();
+        p.download(c, t.0.path()).await;
         p.indirect = false;
-        let cwd = t.path().join("addons/@bendn/test");
+        let cwd = t.0.path().join("addons/@bendn/test");
         assert_eq!(
             Path::new(
                 p.modify_load(Path::new("addons/test/main.gd"), &cwd, dep_map)
                     .to_str()
                     .unwrap()
             ),
-            t.path().join("addons/@bendn/test/main.gd")
+            t.0.path().join("addons/@bendn/test/main.gd")
         );
 
         // dependency usage test
@@ -534,7 +538,7 @@ mod tests {
                     .to_str()
                     .unwrap()
             ),
-            t.path()
+            t.0.path()
                 .join("addons/__gpm_deps/@bendn/gdcli/1.2.5/Parser.gd")
         )
     }

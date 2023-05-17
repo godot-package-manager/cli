@@ -1,11 +1,11 @@
 use crate::config_file::Cache;
 use crate::package::{Manifest, Package};
+use crate::Client;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use reqwest::Client;
 use semver_rs::Version;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt};
 
 #[derive(Clone, Debug)]
@@ -113,7 +113,7 @@ impl std::str::FromStr for ParsedPackage {
     }
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct ParsedManifest {
     pub dist: ParsedManifestDist,
     #[serde(default)]
@@ -127,7 +127,7 @@ impl fmt::Debug for ParsedManifest {
     }
 }
 
-#[derive(Clone, Default, Debug, Deserialize)]
+#[derive(Clone, Default, Debug, Deserialize, Serialize)]
 pub struct ParsedManifestDist {
     pub shasum: String,
     pub tarball: String,
@@ -144,11 +144,12 @@ impl ParsedManifest {
     }
 }
 
+#[derive(Serialize)]
 pub struct Packument {
     pub versions: Vec<ParsedManifest>, // note: unprocessed manifests because we dont want to make requests for versions we dont need
 }
 
-#[derive(Clone, Default, Debug, Deserialize)]
+#[derive(Clone, Default, Debug, Deserialize, Serialize)]
 pub struct ParsedPackument {
     pub versions: HashMap<String, ParsedManifest>,
 }

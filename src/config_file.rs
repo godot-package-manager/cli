@@ -1,9 +1,9 @@
 use crate::ctx;
 use crate::package::parsing::IntoPackageList;
 use crate::package::Package;
+use crate::Client;
 use anyhow::{Context, Result};
 use console::style;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -185,8 +185,8 @@ mod tests {
 
     #[tokio::test]
     async fn parse() {
-        let t = crate::test_utils::mktemp();
-        let c = crate::mkclient();
+        let t = crate::test_utils::mktemp().await;
+        let c = t.2;
         let cache = create_cache();
         let cfgs: [&mut ConfigFile; 3] = [
             &mut ConfigFile::new(
@@ -225,10 +225,10 @@ mod tests {
                 "@bendn/gdcli@1.2.5"
             );
             for mut p in cfg.collect() {
-                p.download(c.clone(), t.path()).await
+                p.download(c.clone(), t.0.path()).await
             }
             assert_eq!(
-                serde_json::from_str::<Vec<LockFileEntry>>(cfg.lock(t.path()).as_str()).unwrap(),
+                serde_json::from_str::<Vec<LockFileEntry>>(cfg.lock(t.0.path()).as_str()).unwrap(),
                 wanted_lockfile
             );
         }

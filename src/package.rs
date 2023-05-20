@@ -1,8 +1,12 @@
+use crate::Cache;
 use crate::Client;
+
+use anyhow::bail;
 use anyhow::{anyhow, Context, Result};
+use async_recursion::async_recursion;
 use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
-use semver_rs::{Parseable, Range, Version};
+use semver_rs::{Range, Version};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 use std::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, write};
@@ -15,8 +19,6 @@ use tar::{Archive, EntryType::Directory};
 pub mod parsing;
 use parsing::*;
 
-use crate::config_file::Cache;
-
 type DepMap = HashMap<String, PathBuf>;
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Serialize, Hash)]
@@ -27,8 +29,6 @@ type DepMap = HashMap<String, PathBuf>;
 /// - removal
 pub struct Package {
     pub name: String,
-    #[serde(skip)]
-    pub version: Version,
     #[serde(skip)]
     pub indirect: bool,
     #[serde(flatten)]
@@ -45,7 +45,7 @@ pub struct Manifest {
     #[serde(skip)]
     pub dependencies: Vec<Package>,
     #[serde(skip)]
-    version: Version,
+    pub version: Version,
 }
 
 #[macro_export]
@@ -103,6 +103,15 @@ where
 }
 
 impl Package {
+    pub fn from_manifest(m: Manifest, name: String) -> Self {
+        Self {
+            _lockfile_version_string: m.version.to_string(),
+            manifest: m,
+            name,
+            ..Default::default()
+        }
+    }
+
     #[inline]
     /// Does this package have dependencies?
     pub fn has_deps(&mut self) -> bool {
@@ -111,6 +120,7 @@ impl Package {
 
     /// Creates a new [Package] from a name and version.
     /// Makes network calls to get the manifest (which makes network calls to get dependency manifests) (unless cached)
+    #[async_recursion]
     pub async fn new(name: String, version: String, client: Client, cache: Cache) -> Result<Self> {
         let version = version.trim();
         if version.is_empty() {
@@ -121,47 +131,43 @@ impl Package {
             Range::new(version).parse(),
             "parsing version range {version} for {name}"
         )?; // this does ~ and ^  and >= and < and || e.q parsing
-        if let Some(versions) = cache.lock().unwrap().get(&name) {
-            for package in versions.values() {
-                if r.test(&package.version) {
-                    return Ok(package.clone());
-                }
-            }
+
+        if let Some(got) = cache.get_mut(&name) {
+            let mut vers = got.clone(); // clone to remove references to dashmap
+            drop(got); // drop reference (let x = x doesnt drop original x until scope ends)
+            if let Some(mut find) = vers.find_version(&r) {
+                // find is a reference to vers which is cloned (not ref to dashmap)
+                // this block was supposed to be
+                // Ok(find.parse(...).await?.get_package())
+                // but then it deadlocked because get_package() would recurse
+                find.parse(client, cache.clone(), name.clone()).await?;
+                let p = find.get_package();
+                cache.insert(name, find.key().clone(), std::mem::take(find.value_mut())); // cloned find, must now replace
+                return Ok(p);
+            };
         }
         let packument = ctx!(
             Self::get_packument(client.clone(), &name).await,
             "getting packument for {name}"
         )?;
-        let mut versions = Vec::with_capacity(packument.versions.len());
-        for v in packument.versions {
-            versions.push(v.version.clone());
-            let version = ctx!(
-                Version::parse(&v.version, None),
-                "parsing version from packument of {name}"
-            )?;
-            let vlone = v.clone(); // purely for the print
-            if r.test(&version) {
-                let p = Package {
-                    _lockfile_version_string: v.version.to_string(),
-                    version,
-                    manifest: ctx!(
-                        v.clone().into_manifest(client, cache.clone()).await,
-                        "parsing {vlone:?} into Manifest for package {name}"
-                    )?,
-                    name: name.clone(),
-                    ..Default::default()
-                };
-                cache
-                    .lock()
-                    .unwrap()
-                    .entry(name)
-                    .or_default()
-                    .insert(v.version.to_string(), p.clone());
-                return Ok(p);
-            };
+        let mut versions = {
+            let ec = cache.clone();
+            let mut e = ec.entry(name.clone()).or_default();
+            // clone to not have references to dashmap which causes deadlock
+            // this does (should) still insert the packument in the real cache
+            e.insert_packument(packument).clone()
+        };
+        // do it again with the new entrys inserted
+        if let Some(mut find) = versions.find_version(&r) {
+            find.parse(client, cache.clone(), name.clone()).await?;
+            let p = find.get_package();
+            cache.insert(name, find.key().clone(), std::mem::take(find.value_mut()));
+            return Ok(p);
         }
-
-        Err(anyhow!("Failed to match version for package {name} matching {version}. Tried versions: {versions:?}"))
+        bail!(
+            "Failed to match version for package {name} matching {version}. Tried versions: {:?}",
+            versions
+        );
     }
 
     /// Create a package from a [str]. see also [ParsedPackage].
@@ -176,9 +182,9 @@ impl Package {
     /// Creates a new [Package] from a name, gets the latest version from registry/name.
     pub async fn new_no_version(name: String, client: Client, cache: Cache) -> Result<Package> {
         const MARKER: &str = "🐢"; // latest
-        if let Some(versions) = cache.lock().unwrap().get_mut(&name) {
-            if let Some(marker) = versions.get(MARKER) {
-                return Ok(marker.clone());
+        if let Some(n) = cache.get(&name) {
+            if let Some(marker) = n.get(MARKER) {
+                return Ok(marker.get_package()); // doesnt recurse
             }
         }
         let resp = get!(client.clone(), "{}/{name}/latest", client.registry)?
@@ -193,16 +199,10 @@ impl Package {
         let latest = Package {
             name: name.to_owned(),
             _lockfile_version_string: resp.version.to_string(),
-            version: resp.version.clone(),
             manifest: resp,
             ..Default::default()
         };
-        cache
-            .lock()
-            .unwrap()
-            .entry(name)
-            .or_default()
-            .insert(MARKER.to_owned(), latest.clone());
+        cache.insert(name, MARKER.to_owned(), latest.clone().into());
         Ok(latest)
     }
 
@@ -292,7 +292,7 @@ impl Package {
         cwd.join("addons")
             .join("__gpm_deps")
             .join(self.name.clone())
-            .join(self.version.to_string())
+            .join(self.manifest.version.to_string())
     }
 }
 
@@ -447,7 +447,7 @@ impl Package {
 impl fmt::Display for Package {
     /// Stringifies this [Package], format my_p@1.0.0.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}@{}", self.name, self.version)
+        write!(f, "{}@{}", self.name, self.manifest.version)
     }
 }
 
@@ -460,13 +460,13 @@ impl fmt::Debug for Package {
 
 #[cfg(test)]
 mod tests {
-    use crate::{config_file::create_cache, package::*};
+    use crate::{package::*, Cache};
 
     #[tokio::test]
     async fn download() {
         let t = crate::test_utils::mktemp().await;
         let c = t.2;
-        let mut p = Package::create_from_str("@bendn/test:2.0.10", c.clone(), create_cache())
+        let mut p = Package::create_from_str("@bendn/test:2.0.10", c.clone(), Cache::new())
             .await
             .unwrap();
         p.download(c.clone(), t.0.path()).await;
@@ -490,7 +490,7 @@ mod tests {
             Package::create_from_str(
                 "@bendn/test@2.0.10",
                 crate::test_utils::mktemp().await.2,
-                create_cache()
+                Cache::new()
             )
             .await
             .unwrap()
@@ -515,7 +515,7 @@ mod tests {
     async fn modify_load() {
         let t = crate::test_utils::mktemp().await;
         let c = t.2;
-        let mut p = Package::create_from_str("@bendn/test=2.0.10", c.clone(), create_cache())
+        let mut p = Package::create_from_str("@bendn/test=2.0.10", c.clone(), Cache::new())
             .await
             .unwrap();
         let dep_map = &p.dep_map(t.0.path()).unwrap();

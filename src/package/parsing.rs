@@ -1,5 +1,5 @@
-use crate::config_file::Cache;
 use crate::package::{Manifest, Package};
+use crate::Cache;
 use crate::Client;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -8,17 +8,18 @@ use semver_rs::Version;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ParsedPackage {
     pub name: String,
     pub version: VersionType,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum VersionType {
     /// Normal version, just use it
     Normal(String),
     /// Abstract version, figure it out later
+    #[default]
     Latest,
 }
 

@@ -17,9 +17,11 @@
 <details>
 <summary>ArchLinux</summary>
 
-> **Note** This package installs to /usr/bin/godot-package-manager to avoid conflicts with [general purpose mouse](https://www.nico.schottelius.org/software/gpm/)
+There's an AUR package available: [godot-package-manager-git](https://aur.archlinux.org/packages/godot-package-manager-git)
 
-1. `pacman -S godot-package-manager-git`
+> **Note** This package installs to /usr/bin/godot-package-manager to avoid conflicts with [general purpose mouse](https://www.nico.schottelius.org/software/gpm/). Assuming you have `yay` installed:
+
+1. `yay -S godot-package-manager-git`
 
 </details>
 

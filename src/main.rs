@@ -1,12 +1,15 @@
+mod archive;
 mod cache;
 mod config_file;
+mod conversions;
 mod package;
 mod theme;
 mod verbosity;
 
 use cache::Cache;
 use config_file::{ConfigFile, ConfigType};
-use package::parsing::{IntoPackageList, ParsedPackage};
+use conversions::*;
+use package::parsing::ParsedPackage;
 use package::Package;
 
 use anyhow::Result;
@@ -129,16 +132,29 @@ enum PrefixType {
 #[derive(Clone)]
 pub struct Client {
     real: RealClient,
+    cache: Cache,
     registry: String,
 }
 
 impl Client {
-    pub fn wrap(real: RealClient, registry: String) -> Self {
-        Self { real, registry }
+    pub fn wrap(real: RealClient, cache: Cache, registry: String) -> Self {
+        Self {
+            real,
+            registry,
+            cache,
+        }
     }
 
     pub fn get<U: IntoUrl>(&self, url: U) -> RequestBuilder {
         self.real.get(url)
+    }
+
+    pub fn cache(&self) -> Cache {
+        self.cache.clone()
+    }
+
+    pub fn cache_ref(&self) -> &Cache {
+        &self.cache
     }
 }
 
@@ -174,7 +190,6 @@ async fn main() {
         ColorChoice::Never => set_colors(false),
         ColorChoice::Auto => set_colors(Term::stdout().is_term() && Term::stderr().is_term()),
     }
-    let cache = Cache::new();
     let client = mkclient(args.registry);
     let mut cfg = {
         let mut contents = String::from("");
@@ -188,7 +203,7 @@ async fn main() {
         } else {
             contents = read_to_string(args.config_file).expect("Reading config file should be ok");
         };
-        ConfigFile::new(&contents, client.clone(), cache.clone()).await
+        ConfigFile::new(&contents, client.clone()).await
     };
     fn lock(cfg: &mut ConfigFile, path: PathBuf, cwd: &Path) {
         let lockfile = cfg.lock(cwd);
@@ -227,11 +242,10 @@ async fn main() {
         Actions::Init { packages } => {
             init(
                 packages
-                    .into_package_list(client.clone(), cache.clone())
+                    .try_into_async(client.clone())
                     .await
                     .expect("Failed to parse `init` packages"),
                 client,
-                cache,
                 &cwd,
             )
             .await
@@ -256,6 +270,7 @@ pub fn mkclient(r: String) -> Client {
             .default_headers(headers)
             .build()
             .unwrap(),
+        Cache::new(),
         r,
     )
 }
@@ -508,7 +523,7 @@ async fn tree(
             );
             if print_tarballs {
                 tree.push(' ');
-                tree.push_str(p.manifest.tarball.as_str());
+                tree.push_str(&p.manifest.tarball.to_string());
             }
             tree.push('\n');
             if p.has_deps() {
@@ -536,8 +551,8 @@ async fn tree(
     tree
 }
 
-async fn init(mut packages: Vec<Package>, client: Client, cache: Cache, cwd: &Path) -> Result<()> {
-    let mut c = ConfigFile::empty(cache.clone());
+async fn init(mut packages: Vec<Package>, client: Client, cwd: &Path) -> Result<()> {
+    let mut c = ConfigFile::empty();
     if packages.is_empty() {
         let mut has_asked = false;
         let mut just_failed = false;
@@ -553,7 +568,7 @@ async fn init(mut packages: Vec<Package>, client: Client, cache: Cache, cwd: &Pa
             has_asked = true;
             let p: ParsedPackage = putils::input("Package?")?;
             let p_name = p.to_string();
-            let res = p.into_package(client.clone(), cache.clone()).await;
+            let res = p.into_package(client.clone()).await;
             if let Err(e) = res {
                 putils::fail(format!("{p_name} could not be parsed: {e}").as_str())?;
                 just_failed = true;
@@ -655,12 +670,9 @@ mod test_utils {
 async fn gpm() {
     let t = test_utils::mktemp().await;
     let c = t.2;
-    let cfg_file = &mut config_file::ConfigFile::new(
-        &r#"packages: {"@bendn/test":2.0.10}"#.into(),
-        c.clone(),
-        Cache::new(),
-    )
-    .await;
+    let cfg_file =
+        &mut config_file::ConfigFile::new(&r#"packages: {"@bendn/test":2.0.10}"#.into(), c.clone())
+            .await;
     update(cfg_file, false, Verbosity::Verbose, c.clone(), t.0.path()).await;
     assert_eq!(test_utils::hashd(&t.0.path().join("addons")).join("|"), "1c2fd93634817a9e5f3f22427bb6b487520d48cf3cbf33e93614b055bcbd1329|8e77e3adf577d32c8bc98981f05d40b2eb303271da08bfa7e205d3f27e188bd7|a625595a71b159e33b3d1ee6c13bea9fc4372be426dd067186fe2e614ce76e3c|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c5566e4fbea9cc6dbebd9366b09e523b20870b1d69dc812249fccd766ebce48e|c850a9300388d6da1566c12a389927c3353bf931c4d6ea59b02beb302aac03ea|d060936e5f1e8b1f705066ade6d8c6de90435a91c51f122905a322251a181a5c|d711b57105906669572a0e53b8b726619e3a21463638aeda54e586a320ed0fc5|d794f3cee783779f50f37a53e1d46d9ebbc5ee7b37c36d7b6ee717773b6955cd|e4f9df20b366a114759282209ff14560401e316b0059c1746c979f478e363e87");
     purge(cfg_file, Verbosity::Verbose, t.0.path());

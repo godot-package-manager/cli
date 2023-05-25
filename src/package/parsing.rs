@@ -1,5 +1,6 @@
+use crate::archive::*;
+use crate::conversions::*;
 use crate::package::{Manifest, Package};
-use crate::Cache;
 use crate::Client;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -38,10 +39,10 @@ impl fmt::Display for VersionType {
 
 impl ParsedPackage {
     /// Turn into a [Package].
-    pub async fn into_package(self, client: Client, cache: Cache) -> Result<Package> {
+    pub async fn into_package(self, client: Client) -> Result<Package> {
         match self.version {
-            VersionType::Normal(v) => Package::new(self.name, v, client, cache).await,
-            VersionType::Latest => Package::new_no_version(self.name, client, cache).await,
+            VersionType::Normal(v) => Package::new(self.name, v, client).await,
+            VersionType::Latest => Package::new_no_version(self.name, client).await,
         }
     }
 }
@@ -134,13 +135,14 @@ pub struct ParsedManifestDist {
     pub tarball: String,
 }
 
-impl ParsedManifest {
-    pub async fn into_manifest(self, client: Client, cache: Cache) -> Result<Manifest> {
+#[async_trait::async_trait]
+impl TryFromAsync<ParsedManifest> for Manifest {
+    async fn try_from_async(value: ParsedManifest, client: Client) -> Result<Manifest> {
         Ok(Manifest {
-            shasum: self.dist.shasum,
-            tarball: self.dist.tarball,
-            version: Version::new(&self.version).parse()?,
-            dependencies: self.dependencies.into_package_list(client, cache).await?,
+            shasum: Some(value.dist.shasum),
+            tarball: CompressionType::Gzip(Data::new_uri(value.dist.tarball)),
+            version: Version::new(&value.version).parse()?,
+            dependencies: value.dependencies.try_into_async(client).await?,
         })
     }
 }
@@ -170,19 +172,16 @@ impl From<ParsedPackument> for Packument {
 }
 
 #[async_trait]
-pub trait IntoPackageList {
-    async fn into_package_list(self, client: Client, cache: Cache) -> Result<Vec<Package>>;
-}
-
-#[async_trait]
-impl IntoPackageList for HashMap<String, String> {
-    async fn into_package_list(self, client: Client, cache: Cache) -> Result<Vec<Package>> {
-        stream::iter(self.into_iter())
+impl TryFromAsync<HashMap<String, String>> for Vec<Package> {
+    async fn try_from_async(
+        value: HashMap<String, String>,
+        client: Client,
+    ) -> Result<Vec<Package>> {
+        stream::iter(value.into_iter())
             .map(|(name, version)| async {
                 let client = client.clone();
-                let cache = cache.clone();
                 async move {
-                    let mut r = Package::new(name.clone(), version.clone(), client, cache).await;
+                    let mut r = Package::new(name.clone(), version.clone(), client).await;
                     if let Ok(p) = &mut r {
                         p.indirect = true;
                     }
@@ -199,13 +198,12 @@ impl IntoPackageList for HashMap<String, String> {
 }
 
 #[async_trait]
-impl IntoPackageList for Vec<ParsedPackage> {
-    async fn into_package_list(self, client: Client, cache: Cache) -> Result<Vec<Package>> {
-        stream::iter(self.into_iter())
+impl TryFromAsync<Vec<ParsedPackage>> for Vec<Package> {
+    async fn try_from_async(value: Vec<ParsedPackage>, client: Client) -> Result<Vec<Package>> {
+        stream::iter(value.into_iter())
             .map(|pp| async {
                 let client = client.clone();
-                let cache = cache.clone();
-                async move { pp.into_package(client, cache).await }.await
+                async move { pp.into_package(client).await }.await
             })
             .buffer_unordered(crate::PARALLEL)
             .collect::<Vec<Result<Package>>>()

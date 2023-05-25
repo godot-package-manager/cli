@@ -1,9 +1,11 @@
+mod cache;
 mod config_file;
 mod package;
 mod theme;
 mod verbosity;
 
-use config_file::{create_cache, Cache, ConfigFile, ConfigType};
+use cache::Cache;
+use config_file::{ConfigFile, ConfigType};
 use package::parsing::{IntoPackageList, ParsedPackage};
 use package::Package;
 
@@ -172,7 +174,7 @@ async fn main() {
         ColorChoice::Never => set_colors(false),
         ColorChoice::Auto => set_colors(Term::stdout().is_term() && Term::stderr().is_term()),
     }
-    let cache = create_cache();
+    let cache = Cache::new();
     let client = mkclient(args.registry);
     let mut cfg = {
         let mut contents = String::from("");
@@ -535,7 +537,7 @@ async fn tree(
 }
 
 async fn init(mut packages: Vec<Package>, client: Client, cache: Cache, cwd: &Path) -> Result<()> {
-    let mut c = ConfigFile::default();
+    let mut c = ConfigFile::empty(cache.clone());
     if packages.is_empty() {
         let mut has_asked = false;
         let mut just_failed = false;
@@ -582,9 +584,7 @@ async fn init(mut packages: Vec<Package>, client: Client, cache: Cache, cwd: &Pa
         )?)
         .to_path_buf();
     }
-    let c_text = c
-        .clone()
-        .print(types[putils::select(&types, "Language to save in:", 2)?]);
+    let c_text = c.print(types[putils::select(&types, "Language to save in:", 2)?]);
     write(path, c_text)?;
     if putils::confirm("Would you like to view the dependency tree?", true)? {
         println!(
@@ -658,7 +658,7 @@ async fn gpm() {
     let cfg_file = &mut config_file::ConfigFile::new(
         &r#"packages: {"@bendn/test":2.0.10}"#.into(),
         c.clone(),
-        create_cache(),
+        Cache::new(),
     )
     .await;
     update(cfg_file, false, Verbosity::Verbose, c.clone(), t.0.path()).await;

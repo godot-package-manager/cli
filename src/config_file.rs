@@ -1,17 +1,15 @@
 use crate::ctx;
 use crate::package::parsing::IntoPackageList;
 use crate::package::Package;
+use crate::Cache;
 use crate::Client;
+
 use anyhow::{Context, Result};
 use console::style;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
-pub type Cache = Arc<Mutex<HashMap<String, HashMap<String, Package>>>>;
-
-#[derive(Debug, Default, Clone)]
 /// The config file: parsed from godot.package, usually.
 /// Contains only a list of [Package]s, currently.
 pub struct ConfigFile {
@@ -19,11 +17,7 @@ pub struct ConfigFile {
     pub cache: Cache, // hooks: there are no hooks now
 }
 
-pub fn create_cache() -> Cache {
-    Cache::new(Mutex::new(HashMap::new()))
-}
-
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default)]
 #[serde(default)]
 /// A wrapper to [ConfigFile]. This _is_ necessary.
 /// Any alternatives will end up being more ugly than this. (trust me i tried)
@@ -47,13 +41,13 @@ impl std::fmt::Display for ConfigType {
     }
 }
 
-impl From<ConfigFile> for ParsedConfig {
-    fn from(from: ConfigFile) -> Self {
+impl From<&ConfigFile> for ParsedConfig {
+    fn from(from: &ConfigFile) -> Self {
         Self {
             packages: from
                 .packages
-                .into_iter()
-                .map(|p| (p.name, p.version.to_string()))
+                .iter()
+                .map(|p| (p.name.to_string(), p.manifest.version.to_string()))
                 .collect(),
         }
     }
@@ -82,7 +76,14 @@ impl ParsedConfig {
 }
 
 impl ConfigFile {
-    pub fn print(self, t: ConfigType) -> String {
+    pub fn empty(cache: Cache) -> Self {
+        Self {
+            packages: vec![],
+            cache,
+        }
+    }
+
+    pub fn print(&self, t: ConfigType) -> String {
         let w = ParsedConfig::from(self);
         match t {
             ConfigType::JSON => serde_json::to_string_pretty(&w).unwrap(),
@@ -112,16 +113,15 @@ impl ConfigFile {
             for i in [ConfigType::JSON, ConfigType::YAML, ConfigType::TOML].into_iter() {
                 let res = Self::parse(contents, i, client.clone(), cache.clone()).await;
 
-                // im sure theres some kind of idiomatic rust way to do this that i dont know of
-                if res.is_ok() {
-                    return res.unwrap();
+                if let Ok(parsed) = res {
+                    return parsed;
                 }
 
                 println!(
                     "{:>12} Parsing CFG from {:#?} failed: `{}` (ignore if cfg not written in {:#?})",
                     crate::putils::warn(),
                     i,
-                    style(res.unwrap_err()).red(),
+                    style(res.err().unwrap()).red(),
                     i
                 )
             }
@@ -187,7 +187,7 @@ mod tests {
     async fn parse() {
         let t = crate::test_utils::mktemp().await;
         let c = t.2;
-        let cache = create_cache();
+        let cache = Cache::new();
         let cfgs: [&mut ConfigFile; 3] = [
             &mut ConfigFile::new(
                 &r#"dependencies: { "@bendn/test": 2.0.10 }"#.into(),

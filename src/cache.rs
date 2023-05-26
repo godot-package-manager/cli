@@ -1,3 +1,5 @@
+use crate::archive::*;
+use crate::conversions::TryIntoAsync;
 use crate::package::parsing::{Packument, ParsedManifest, ParsedPackage};
 use crate::package::Package;
 use crate::{ctx, Client};
@@ -127,13 +129,20 @@ impl std::fmt::Debug for VersionsCache {
     }
 }
 
-#[derive(Debug, Clone, Default)] // yuck, a clone
+#[derive(Default, Clone)] // yuck, a clone
 pub enum CacheEntry {
     Unparsed(ParsedPackage),
     Parsed(Package),
     Manifest(ParsedManifest),
+    Tarball(CompressionType),
     #[default]
     Empty,
+}
+
+impl From<CompressionType> for CacheEntry {
+    fn from(value: CompressionType) -> Self {
+        Self::Tarball(value)
+    }
 }
 
 impl From<Package> for CacheEntry {
@@ -153,22 +162,23 @@ impl From<ParsedPackage> for CacheEntry {
 }
 
 impl CacheEntry {
-    pub async fn parse(&mut self, client: Client, cache: Cache, name: String) -> Result<()> {
-        match self {
-            CacheEntry::Unparsed(p) => {
-                let p = std::mem::take(p).into_package(client, cache).await?;
-                *self = CacheEntry::Parsed(p);
-            }
+    pub async fn parse(&mut self, client: Client, name: String) -> Result<()> {
+        *self = CacheEntry::from(match self {
+            CacheEntry::Unparsed(p) => std::mem::take(p).into_package(client).await?,
             CacheEntry::Manifest(m) => {
                 let m = ctx!(
-                    std::mem::take(m).into_manifest(client, cache).await,
+                    std::mem::take(m).try_into_async(client).await,
                     "parsing ParsedManifest into Manifest in get_package()"
                 )?;
-                let p = Package::from_manifest(m, name.clone());
-                *self = CacheEntry::Parsed(p);
+                Package::from_manifest(m, name.clone())
             }
-            _ => {}
-        }
+            CacheEntry::Tarball(t) => {
+                Archive::new(std::mem::take(t))?
+                    .into_package(client)
+                    .await?
+            }
+            _ => return Ok(()),
+        });
         Ok(())
     }
 
@@ -178,4 +188,11 @@ impl CacheEntry {
             _ => unreachable!(),
         }
     }
+
+    // pub fn get_bytes(&self) -> &Vec<u8> {
+    //     match self {
+    //         CacheEntry::Tarball(t) => t,
+    //         _ => unreachable!(),
+    //     }
+    // }
 }

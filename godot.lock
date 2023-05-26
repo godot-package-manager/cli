@@ -6,8 +6,8 @@
   },
   {
     "name": "@bendn/splitter",
-    "tarball": "https://registry.npmjs.org/@bendn/splitter/-/splitter-1.0.6.tgz",
-    "version": "1.0.6"
+    "tarball": "https://github.com/bend-n/splitter/archive/refs/heads/main.zip",
+    "version": "1.1.0"
   },
   {
     "name": "@bendn/stockfish.gd",

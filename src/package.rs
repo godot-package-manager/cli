@@ -1,20 +1,19 @@
-use crate::Cache;
+use crate::archive::*;
+use crate::cache::CacheEntry;
+use crate::conversions::TryIntoAsync;
 use crate::Client;
 
 use anyhow::bail;
 use anyhow::{anyhow, Context, Result};
 use async_recursion::async_recursion;
-use flate2::read::GzDecoder;
 use regex::{Captures, Regex};
 use semver_rs::{Range, Version};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
-use std::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, write};
-use std::io;
-use std::path::{Component::Normal, Path, PathBuf};
+use std::fs::{read_dir, read_to_string, remove_dir_all, write};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{collections::HashMap, fmt};
-use tar::{Archive, EntryType::Directory};
 
 pub mod parsing;
 use parsing::*;
@@ -40,8 +39,8 @@ pub struct Package {
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd, Default, Debug, Serialize, Hash)]
 pub struct Manifest {
     #[serde(skip)]
-    pub shasum: String,
-    pub tarball: String,
+    pub shasum: Option<String>,
+    pub tarball: CompressionType,
     #[serde(skip)]
     pub dependencies: Vec<Package>,
     #[serde(skip)]
@@ -55,54 +54,18 @@ macro_rules! ctx {
     };
 }
 
+#[macro_export]
 macro_rules! get {
     ($client: expr, $fmt:literal $(, $args:expr)* $(,)?) => {
         $client.get(&format!($fmt $(, $args)*)).send().await
     };
 }
 
-/// Emulates `tar xzf archive --strip-components=1 --directory=P`.
-fn unpack<R>(mut archive: Archive<R>, dst: &Path) -> io::Result<()>
-where
-    R: io::Read,
-{
-    if dst.symlink_metadata().is_err() {
-        create_dir_all(dst)?;
-    }
-
-    let dst = &dst.canonicalize().unwrap_or(dst.to_path_buf());
-
-    // Delay any directory entries until the end (they will be created if needed by
-    // descendants), to ensure that directory permissions do not interfer with descendant
-    // extraction.
-    let mut directories = Vec::new();
-    for entry in archive.entries()? {
-        let entry = entry?;
-        let mut entry = (
-            dst.join(
-                entry
-                    .path()?
-                    .components()
-                    .skip(1)
-                    .filter(|c| matches!(c, Normal(_)))
-                    .collect::<PathBuf>(),
-            ),
-            entry,
-        );
-        if entry.1.header().entry_type() == Directory {
-            directories.push(entry);
-        } else {
-            create_dir_all(entry.0.parent().unwrap())?;
-            entry.1.unpack(entry.0)?;
-        }
-    }
-    for mut dir in directories {
-        dir.1.unpack(dir.0)?;
-    }
-    Ok(())
-}
-
 impl Package {
+    pub fn prepare_lock(&mut self) {
+        self.manifest.tarball.lock()
+    }
+
     pub fn from_manifest(m: Manifest, name: String) -> Self {
         Self {
             _lockfile_version_string: m.version.to_string(),
@@ -121,18 +84,21 @@ impl Package {
     /// Creates a new [Package] from a name and version.
     /// Makes network calls to get the manifest (which makes network calls to get dependency manifests) (unless cached)
     #[async_recursion]
-    pub async fn new(name: String, version: String, client: Client, cache: Cache) -> Result<Self> {
+    pub async fn new(name: String, version: String, client: Client) -> Result<Self> {
         let version = version.trim();
         if version.is_empty() {
             // i forgot what this is for
-            return Self::new_no_version(name, client, cache).await;
+            return Self::new_no_version(name, client).await;
         }
         let r = ctx!(
             Range::new(version).parse(),
             "parsing version range {version} for {name}"
         )?; // this does ~ and ^  and >= and < and || e.q parsing
+        if name.starts_with("http") {
+            return Self::get_tarball(name, version.to_owned(), &r, client).await;
+        }
 
-        if let Some(got) = cache.get_mut(&name) {
+        if let Some(got) = client.cache().get_mut(&name) {
             let mut vers = got.clone(); // clone to remove references to dashmap
             drop(got); // drop reference (let x = x doesnt drop original x until scope ends)
             if let Some(mut find) = vers.find_version(&r) {
@@ -140,9 +106,13 @@ impl Package {
                 // this block was supposed to be
                 // Ok(find.parse(...).await?.get_package())
                 // but then it deadlocked because get_package() would recurse
-                find.parse(client, cache.clone(), name.clone()).await?;
+                find.parse(client.clone(), name.clone()).await?;
                 let p = find.get_package();
-                cache.insert(name, find.key().clone(), std::mem::take(find.value_mut())); // cloned find, must now replace
+                client.cache_ref().insert(
+                    name,
+                    find.key().clone(),
+                    std::mem::take(find.value_mut()),
+                ); // cloned find, must now replace
                 return Ok(p);
             };
         }
@@ -151,17 +121,18 @@ impl Package {
             "getting packument for {name}"
         )?;
         let mut versions = {
-            let ec = cache.clone();
-            let mut e = ec.entry(name.clone()).or_default();
+            let mut e = client.cache_ref().entry(name.clone()).or_default();
             // clone to not have references to dashmap which causes deadlock
             // this does (should) still insert the packument in the real cache
             e.insert_packument(packument).clone()
         };
         // do it again with the new entrys inserted
         if let Some(mut find) = versions.find_version(&r) {
-            find.parse(client, cache.clone(), name.clone()).await?;
+            find.parse(client.clone(), name.clone()).await?;
             let p = find.get_package();
-            cache.insert(name, find.key().clone(), std::mem::take(find.value_mut()));
+            client
+                .cache()
+                .insert(name, find.key().clone(), std::mem::take(find.value_mut()));
             return Ok(p);
         }
         bail!(
@@ -172,17 +143,39 @@ impl Package {
 
     /// Create a package from a [str]. see also [ParsedPackage].
     #[allow(dead_code)] // used for tests
-    pub async fn create_from_str(s: &str, client: Client, cache: Cache) -> Result<Package> {
+    pub async fn create_from_str(s: &str, client: Client) -> Result<Package> {
         ParsedPackage::from_str(s)
             .unwrap()
-            .into_package(client, cache)
+            .into_package(client)
             .await
     }
 
+    pub async fn get_tarball(
+        uri: String,
+        version: String,
+        range: &Range,
+        client: Client,
+    ) -> Result<Package> {
+        if let Some(mut v) = client.cache().get_mut(&uri) {
+            if let Some(e) = v.find_version(range) {
+                return Ok(e.get_package()); // no recursion, very safe
+            }
+        }
+
+        let resp = ctx!(get!(client.clone(), "{uri}"), "getting tarball {uri}")?;
+        let ty = uri.split('.').last().unwrap_or("zip");
+        let bytes = resp.bytes().await?.to_vec();
+        let mut entry = CacheEntry::from(CompressionType::from(ty, bytes, uri.clone()));
+        entry.parse(client.clone(), uri.clone()).await?;
+        let p = entry.get_package();
+        client.cache().insert(uri, version.clone(), entry);
+        Ok(p)
+    }
+
     /// Creates a new [Package] from a name, gets the latest version from registry/name.
-    pub async fn new_no_version(name: String, client: Client, cache: Cache) -> Result<Package> {
+    pub async fn new_no_version(name: String, client: Client) -> Result<Package> {
         const MARKER: &str = "🐢"; // latest
-        if let Some(n) = cache.get(&name) {
+        if let Some(n) = client.cache().get(&name) {
             if let Some(marker) = n.get(MARKER) {
                 return Ok(marker.get_package()); // doesnt recurse
             }
@@ -193,8 +186,8 @@ impl Package {
         if resp == "\"Not Found\"" {
             return Err(anyhow!("Package {name} was not found"));
         };
-        let resp = serde_json::from_str::<ParsedManifest>(&resp)?
-            .into_manifest(client.clone(), cache.clone())
+        let resp: Manifest = serde_json::from_str::<ParsedManifest>(&resp)?
+            .try_into_async(client.clone())
             .await?;
         let latest = Package {
             name: name.to_owned(),
@@ -202,7 +195,9 @@ impl Package {
             manifest: resp,
             ..Default::default()
         };
-        cache.insert(name, MARKER.to_owned(), latest.clone().into());
+        client
+            .cache()
+            .insert(name, MARKER.to_owned(), latest.clone().into());
         Ok(latest)
     }
 
@@ -231,21 +226,27 @@ impl Package {
 
         let mut hasher = Sha1::new();
         hasher.update(&bytes);
-        assert_eq!(
-            &self.manifest.shasum,
-            &format!("{:x}", hasher.finalize()),
-            "Tarball did not match checksum!"
-        );
+        if let Some(sha) = &self.manifest.shasum {
+            assert_eq!(
+                sha,
+                &format!("{:x}", hasher.finalize()),
+                "Tarball did not match checksum!"
+            );
+        }
         // println!(
         //     "(\"{}\", hex::decode(\"{}\").unwrap()),",
         //     self.manifest.tarball.replace(&(client.registry + "/"), ""),
         //     hex::encode(&bytes)
         // );
-        unpack(
-            Archive::new(GzDecoder::new(&bytes[..])),
-            &self.download_dir(cwd),
-        )
-        .expect("Tarball should unpack");
+        let ty = match self.manifest.tarball.clone() {
+            CompressionType::Gzip(_) => CompressionType::Gzip(Data::new_bytes(bytes)),
+            CompressionType::Zip(_) => CompressionType::Zip(Data::new_bytes(bytes)),
+            _ => unreachable!(),
+        };
+        Archive::new(ty)
+            .unwrap()
+            .unpack(&self.download_dir(cwd))
+            .expect("Tarball should unpack");
     }
 
     pub async fn get_packument(client: Client, name: &str) -> Result<Packument> {
@@ -460,13 +461,13 @@ impl fmt::Debug for Package {
 
 #[cfg(test)]
 mod tests {
-    use crate::{package::*, Cache};
+    use crate::package::*;
 
     #[tokio::test]
     async fn download() {
         let t = crate::test_utils::mktemp().await;
         let c = t.2;
-        let mut p = Package::create_from_str("@bendn/test:2.0.10", c.clone(), Cache::new())
+        let mut p = Package::create_from_str("@bendn/test:2.0.10", c.clone())
             .await
             .unwrap();
         p.download(c.clone(), t.0.path()).await;
@@ -487,15 +488,11 @@ mod tests {
         // no fs was touched in the making of this test
 
         assert_eq!(
-            Package::create_from_str(
-                "@bendn/test@2.0.10",
-                crate::test_utils::mktemp().await.2,
-                Cache::new()
-            )
-            .await
-            .unwrap()
-            .dep_map(Path::new(""))
-            .unwrap(),
+            Package::create_from_str("@bendn/test@2.0.10", crate::test_utils::mktemp().await.2)
+                .await
+                .unwrap()
+                .dep_map(Path::new(""))
+                .unwrap(),
             HashMap::from([
                 ("test".into(), "addons/@bendn/test".into()),
                 ("@bendn/test".into(), "addons/@bendn/test".into()),
@@ -515,7 +512,7 @@ mod tests {
     async fn modify_load() {
         let t = crate::test_utils::mktemp().await;
         let c = t.2;
-        let mut p = Package::create_from_str("@bendn/test=2.0.10", c.clone(), Cache::new())
+        let mut p = Package::create_from_str("@bendn/test=2.0.10", c.clone())
             .await
             .unwrap();
         let dep_map = &p.dep_map(t.0.path()).unwrap();

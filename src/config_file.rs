@@ -1,20 +1,23 @@
+use crate::conversions::*;
 use crate::ctx;
-use crate::package::parsing::IntoPackageList;
+use crate::package::Manifest;
 use crate::package::Package;
-use crate::Cache;
 use crate::Client;
 
 use anyhow::{Context, Result};
 use console::style;
+use semver_rs::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The config file: parsed from godot.package, usually.
-/// Contains only a list of [Package]s, currently.
+#[derive(Default)]
 pub struct ConfigFile {
+    name: String,
+    version: String,
     pub packages: Vec<Package>,
-    pub cache: Cache, // hooks: there are no hooks now
+    // hooks: there are no hooks now
 }
 
 #[derive(Deserialize, Serialize, Default)]
@@ -26,6 +29,10 @@ struct ParsedConfig {
     // support NPM package.json files (also allows gpm -c package.json -u)
     #[serde(alias = "dependencies")]
     packages: HashMap<String, String>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    version: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,7 +56,28 @@ impl From<&ConfigFile> for ParsedConfig {
                 .iter()
                 .map(|p| (p.name.to_string(), p.manifest.version.to_string()))
                 .collect(),
+            name: String::new(),
+            version: String::new(),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl TryFromAsync<ParsedConfig> for ConfigFile {
+    async fn try_from_async(value: ParsedConfig, client: Client) -> Result<Self> {
+        let mut packages: Vec<Package> = ctx!(
+            value.packages.try_into_async(client).await,
+            "turning ParsedConfig into ConfigFile"
+        )
+        .unwrap();
+        for mut p in &mut packages {
+            p.indirect = false
+        }
+        Ok(ConfigFile {
+            packages,
+            name: value.name,
+            version: value.version,
+        })
     }
 }
 
@@ -61,25 +89,13 @@ impl ParsedConfig {
             ConfigType::YAML => serde_yaml::from_str::<ParsedConfig>(txt)?,
         })
     }
-
-    pub async fn into_configfile(self, client: Client, cache: Cache) -> ConfigFile {
-        let mut packages = ctx!(
-            self.packages.into_package_list(client, cache.clone()).await,
-            "turning ParsedConfig into ConfigFile"
-        )
-        .unwrap();
-        for mut p in &mut packages {
-            p.indirect = false
-        }
-        ConfigFile { packages, cache }
-    }
 }
 
 impl ConfigFile {
-    pub fn empty(cache: Cache) -> Self {
+    pub fn empty() -> Self {
         Self {
             packages: vec![],
-            cache,
+            ..ConfigFile::default()
         }
     }
 
@@ -94,7 +110,7 @@ impl ConfigFile {
 
     /// Creates a new [ConfigFile] from the given text
     /// Panics if the file cant be parsed as toml, hjson or yaml.
-    pub async fn new(contents: &String, client: Client, cache: Cache) -> Self {
+    pub async fn new(contents: &String, client: Client) -> Self {
         if contents.is_empty() {
             panic!("Empty CFG");
         }
@@ -102,16 +118,16 @@ impl ConfigFile {
         // definetly not going to backfire
         let mut cfg = if contents.as_bytes()[0] == b'{' {
             // json gets brute forced first so this isnt really needed
-            Self::parse(contents, ConfigType::JSON, client, cache)
+            Self::parse(contents, ConfigType::JSON, client)
                 .await
                 .expect("Parsing CFG from JSON should work")
         } else if contents.len() > 3 && contents[..3] == *"---" {
-            Self::parse(contents, ConfigType::YAML, client, cache)
+            Self::parse(contents, ConfigType::YAML, client)
                 .await
                 .expect("Parsing CFG from YAML should work")
         } else {
             for i in [ConfigType::JSON, ConfigType::YAML, ConfigType::TOML].into_iter() {
-                let res = Self::parse(contents, i, client.clone(), cache.clone()).await;
+                let res = Self::parse(contents, i, client.clone()).await;
 
                 if let Ok(parsed) = res {
                     return parsed;
@@ -131,19 +147,30 @@ impl ConfigFile {
         cfg
     }
 
-    async fn parse(txt: &str, t: ConfigType, client: Client, cache: Cache) -> Result<ConfigFile> {
-        Ok(ParsedConfig::parse(txt, t)?
-            .into_configfile(client, cache)
-            .await)
+    pub async fn parse(txt: &str, t: ConfigType, client: Client) -> Result<ConfigFile> {
+        ParsedConfig::parse(txt, t)?.try_into_async(client).await
+    }
+
+    pub fn into_package(self, uri: crate::archive::CompressionType) -> Result<Package> {
+        Ok(Package::from_manifest(
+            Manifest {
+                version: Version::new(&self.version).parse()?,
+                shasum: None,
+                tarball: uri,
+                dependencies: self.packages,
+            },
+            self.name,
+        ))
     }
 
     /// Creates a lockfile for this config file.
     /// note: Lockfiles are currently unused.
     pub fn lock(&mut self, cwd: &Path) -> String {
         let mut pkgs = vec![];
-        for p in self.collect() {
+        for mut p in self.collect() {
             if p.is_installed(cwd) {
-                pkgs.push(p)
+                p.prepare_lock();
+                pkgs.push(p);
             };
         }
         pkgs.sort();
@@ -187,24 +214,20 @@ mod tests {
     async fn parse() {
         let t = crate::test_utils::mktemp().await;
         let c = t.2;
-        let cache = Cache::new();
         let cfgs: [&mut ConfigFile; 3] = [
             &mut ConfigFile::new(
                 &r#"dependencies: { "@bendn/test": 2.0.10 }"#.into(),
                 c.clone(),
-                cache.clone(),
             )
             .await,
             &mut ConfigFile::new(
                 &"dependencies:\n  \"@bendn/test\": \"2.0.10\"".into(),
                 c.clone(),
-                cache.clone(),
             )
             .await,
             &mut ConfigFile::new(
                 &"[dependencies]\n\"@bendn/test\" = \"2.0.10\"".into(),
                 c.clone(),
-                cache.clone(),
             )
             .await,
         ];

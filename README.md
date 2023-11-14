@@ -1,29 +1,12 @@
 # Godot Package Manager rust client
 
 [![discord](https://img.shields.io/discord/853476898071117865?label=chat&logo=discord&style=for-the-badge&logoColor=white)](https://discord.gg/6mcdWWBkrr "Chat on Discord")
-[![aur](https://img.shields.io/aur/version/godot-package-manager-git?color=informative&logo=archlinux&logoColor=white&style=for-the-badge)](https://aur.archlinux.org/packages/godot-package-manager-git "AUR package")
 
 ## Installation
 
 > **Note** read the [using packages quickstart](https://github.com/godot-package-manager#using-packages-quickstart) first.
 
-<details open>
-<summary>Manual</summary>
-
-1. Download the [latest version](https://github.com/godot-package-manager/cli/releases/latest)
-2. Move the executable to your `PATH` as `gpm`
-
-</details>
-<details>
-<summary>ArchLinux</summary>
-
-There's an AUR package available: [godot-package-manager-git](https://aur.archlinux.org/packages/godot-package-manager-git)
-
-> **Note** This package installs to /usr/bin/godot-package-manager to avoid conflicts with [general purpose mouse](https://www.nico.schottelius.org/software/gpm/). Assuming you have `yay` installed:
-
-1. `yay -S godot-package-manager-git`
-
-</details>
+1. `cargo install gpm`
 
 ## Usage
 
@@ -35,9 +18,3 @@ gpm tree # prints the tree of installed packages, looks like
 # └── @bendn/test@2.0.10
 #    └── @bendn/gdcli@1.2.5
 ```
-
-## Compiling
-
-1. `git clone --depth 5 https://github.com/godot-package-manager/client`)
-2. `cargo build -r`
-3. Executable is `target/release/godot-package-manager`

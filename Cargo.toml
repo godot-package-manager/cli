@@ -1,10 +1,12 @@
 [package]
-name = "godot-package-manager"
-version = "1.4.0"
+name = "gpm"
+version = "1.4.1"
 edition = "2021"
 authors = ["bendn <bend.n@outlook.com>"]
 description = "A package manager for godot"
 repository = "https://github.com/godot-package-manager/cli"
+keywords = ["godot", "package-manager"]
+categories = ["development-tools::build-utils", "game-development"]
 license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
